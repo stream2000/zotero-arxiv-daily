@@ -17,7 +17,8 @@ from biorxiv_client import BioRxivApi
 from construct_email import render_email, send_email
 from llm import set_global_llm
 from paper import ArxivPaper, BioRxivPaper
-from recommender import rerank_paper
+from recommender import encode_texts, calculate_scores
+from storage import Storage
 
 # Patch arxiv.Result to find PDF URL
 def _get_pdf_url_patch(links) -> str:
@@ -118,14 +119,12 @@ def get_biorxiv_paper(filter_category: str = None, days: int = 1, debug: bool = 
     start_date = end_date - timedelta(days=days)
 
     # Generate list of daily query dates (YYYY-MM-DD)
-    # Iterate day by day to allow parallel fetching
     dates_to_fetch = []
     delta = (end_date - start_date).days
     for i in range(delta + 1):
         d = start_date + timedelta(days=i)
         dates_to_fetch.append(d.strftime("%Y-%m-%d"))
 
-    # Ensure uniqueness and sort
     dates_to_fetch = sorted(list(set(dates_to_fetch)))
 
     start_str = dates_to_fetch[0]
@@ -285,42 +284,93 @@ if __name__ == '__main__':
         logger.remove()
         logger.add(sys.stdout, level="INFO")
 
+    # Initialize Storage
+    db = Storage()
+
     logger.info("Retrieving Zotero corpus...")
     corpus = get_zotero_corpus(args.zotero_id, args.zotero_key)
+    # Sort corpus by date (newest first) for correct scoring weight
+    corpus = sorted(corpus, key=lambda x: datetime.strptime(x['data']['dateAdded'], '%Y-%m-%dT%H:%M:%SZ'), reverse=True)
+    
     logger.info(f"Retrieved {len(corpus)} papers from Zotero.")
     if args.zotero_ignore:
         logger.info(f"Ignoring papers in:\n {args.zotero_ignore}...")
         corpus = filter_corpus(corpus, args.zotero_ignore)
         logger.info(f"Remaining {len(corpus)} papers after filtering.")
 
+    # Update Zotero Embeddings in DB
+    logger.info("Updating Zotero embeddings in local DB...")
+    zotero_texts = [c['data']['abstractNote'] for c in corpus]
+    zotero_embeddings = encode_texts(zotero_texts)
+    db.update_zotero(corpus, zotero_embeddings)
+
+    # Retrieve and Store New Candidates
     if args.source == 'biorxiv':
         logger.info("Retrieving BioRxiv papers...")
-        papers = get_biorxiv_paper(args.biorxiv_category, args.days, args.debug)
+        fetched_papers = get_biorxiv_paper(args.biorxiv_category, args.days, args.debug)
     else:
         logger.info("Retrieving Arxiv papers...")
-        papers = get_arxiv_paper(args.arxiv_query, args.debug)
+        fetched_papers = get_arxiv_paper(args.arxiv_query, args.debug)
 
-    if len(papers) == 0:
-        logger.info(
-            f"No new papers found from {args.source}. Yesterday maybe a holiday and no one submit their work :).")
-        if not args.send_empty:
-            exit(0)
+    if len(fetched_papers) == 0:
+        logger.info(f"No new papers fetched from {args.source}.")
     else:
-        logger.info("Reranking papers...")
-        papers = rerank_paper(papers, corpus)
-        if args.max_paper_num != -1:
-            papers = papers[:args.max_paper_num]
+        # Filter out existing candidates to avoid re-encoding
+        existing_ids = db.get_existing_candidate_ids()
+        new_papers = [p for p in fetched_papers if p.arxiv_id not in existing_ids]
         
-        if args.use_llm_api:
-            logger.info(f"Using {args.llm_provider} API as global LLM.")
-            api_key = args.openai_api_key
-            if args.llm_provider == "gemini" and args.gemini_api_key:
-                api_key = args.gemini_api_key
-            set_global_llm(api_key=api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language,
-                           provider=args.llm_provider)
+        if len(new_papers) > 0:
+            logger.info(f"Encoding {len(new_papers)} new candidates...")
+            new_texts = [p.summary for p in new_papers]
+            new_embeddings = encode_texts(new_texts)
+            db.add_candidates(new_papers, new_embeddings)
         else:
-            logger.info("Using Local LLM as global LLM.")
-            set_global_llm(lang=args.language)
+            logger.info("All fetched papers already exist in DB.")
+
+    # Scoring (Re-score all candidates against current Zotero)
+    logger.info("Calculating relevance scores based on local DB...")
+    
+    # Get all embeddings from DB
+    cand_embeddings = db.get_candidate_embeddings()
+    zotero_embeddings = db.get_zotero_embeddings()
+    
+    if cand_embeddings is not None and zotero_embeddings is not None:
+        scores = calculate_scores(cand_embeddings, zotero_embeddings)
+        all_ids = db.get_all_candidate_ids()
+        
+        if len(all_ids) == len(scores):
+            scores_dict = dict(zip(all_ids, scores))
+            db.update_scores(scores_dict)
+            logger.info("Scores updated.")
+        else:
+            logger.error(f"Mismatch in IDs ({len(all_ids)}) and scores ({len(scores)}).")
+
+    # Generate Report from DB
+    logger.info("Generating report from local DB...")
+    
+    # Get top papers from DB
+    filter_categories = None
+    if args.source == 'biorxiv' and args.biorxiv_category:
+        filter_categories = [c.strip().lower() for c in args.biorxiv_category.split(',')]
+        
+    papers = db.get_top_candidates(limit=args.max_paper_num, filter_categories=filter_categories)
+    
+    if len(papers) == 0:
+         logger.info("No relevant papers found in DB to report.")
+         if not args.send_empty:
+            exit(0)
+    
+    # Setup LLM for TLDR generation (called during render_email -> p.tldr)
+    if args.use_llm_api:
+        logger.info(f"Using {args.llm_provider} API as global LLM.")
+        api_key = args.openai_api_key
+        if args.llm_provider == "gemini" and args.gemini_api_key:
+            api_key = args.gemini_api_key
+        set_global_llm(api_key=api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language,
+                       provider=args.llm_provider)
+    else:
+        logger.info("Using Local LLM as global LLM.")
+        set_global_llm(lang=args.language)
 
     html = render_email(papers)
 

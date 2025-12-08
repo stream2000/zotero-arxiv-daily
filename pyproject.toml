@@ -17,4 +17,6 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "feedparser>=6.0.11",
     "httpx[socks]>=0.28.1",
+    "faiss-cpu>=1.7.4",
+    "numpy>=1.26.0",
 ]
