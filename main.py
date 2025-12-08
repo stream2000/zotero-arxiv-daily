@@ -144,6 +144,18 @@ if __name__ == '__main__':
         default="https://api.openai.com/v1",
     )
     add_argument(
+        "--gemini_api_key",
+        type=str,
+        help="Gemini API key (can also be set via GEMINI_API_KEY environment variable)",
+        default=None,
+    )
+    add_argument(
+        "--llm_provider",
+        type=str,
+        help="LLM Provider (openai, gemini)",
+        default="openai",
+    )
+    add_argument(
         "--model_name",
         type=str,
         help="LLM Model Name",
@@ -155,11 +167,21 @@ if __name__ == '__main__':
         help="Language of TLDR",
         default="English",
     )
+    add_argument(
+        "--output_file",
+        type=str,
+        help="Local output file path",
+        default="report.html",
+    )
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
-    assert (
-        not args.use_llm_api or args.openai_api_key is not None
-    )  # If use_llm_api is True, openai_api_key must be provided
+    
+    if args.use_llm_api:
+        if args.llm_provider == "openai":
+             assert args.openai_api_key is not None, "OpenAI API key is required."
+        elif args.llm_provider == "gemini":
+             assert args.gemini_api_key is not None, "Gemini API key is required for Gemini provider (GEMINI_API_KEY environment variable or --gemini_api_key argument)."
+
     if args.debug:
         logger.remove()
         logger.add(sys.stdout, level="DEBUG")
@@ -187,14 +209,26 @@ if __name__ == '__main__':
         if args.max_paper_num != -1:
             papers = papers[:args.max_paper_num]
         if args.use_llm_api:
-            logger.info("Using OpenAI API as global LLM.")
-            set_global_llm(api_key=args.openai_api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language)
+            logger.info(f"Using {args.llm_provider} API as global LLM.")
+            api_key = args.openai_api_key
+            if args.llm_provider == "gemini" and args.gemini_api_key:
+                api_key = args.gemini_api_key
+            set_global_llm(api_key=api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language, provider=args.llm_provider)
         else:
             logger.info("Using Local LLM as global LLM.")
             set_global_llm(lang=args.language)
 
     html = render_email(papers)
-    logger.info("Sending email...")
-    send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
-    logger.success("Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
+    
+    if args.output_file:
+        with open(args.output_file, 'w', encoding='utf-8') as f:
+            f.write(html)
+        logger.success(f"Report saved to {args.output_file}")
+
+    if args.sender and args.receiver and args.smtp_server and args.smtp_port and args.sender_password:
+        logger.info("Sending email...")
+        send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
+        logger.success("Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
+    else:
+        logger.info("Email configuration is incomplete. Skipping email sending.")
 
