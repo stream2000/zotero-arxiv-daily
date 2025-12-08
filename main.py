@@ -26,9 +26,11 @@ from tqdm import trange,tqdm
 from loguru import logger
 from gitignore_parser import parse_gitignore
 from tempfile import mkstemp
-from paper import ArxivPaper
+from paper import ArxivPaper, BioRxivPaper
 from llm import set_global_llm
 import feedparser
+from biorxiv_client import BioRxivApi
+from datetime import datetime, timedelta
 
 def get_zotero_corpus(id:str,key:str) -> list[dict]:
     zot = zotero.Zotero(id, 'user', key)
@@ -87,6 +89,43 @@ def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
 
     return papers
 
+def get_biorxiv_paper(debug:bool=False) -> list[BioRxivPaper]:
+    api = BioRxivApi()
+    if debug:
+         # Fetch a small range for debugging, e.g. 2 days ago
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=2)
+    else:
+        # Fetch yesterday's papers
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=1)
+        
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    
+    logger.info(f"Retrieving BioRxiv papers from {start_str} to {end_str}...")
+    papers = []
+    try:
+        # get_papers is a generator
+        generator = api.get_papers(start_date=start_str, end_date=end_str)
+        
+        # Convert to list and wrap in BioRxivPaper
+        # Using tqdm if possible, but generator length is unknown.
+        # We'll just iterate and show progress if we count them, or just simple iteration.
+        
+        raw_papers = list(generator)
+        logger.info(f"Found {len(raw_papers)} papers.")
+        
+        for p in tqdm(raw_papers, desc="Processing BioRxiv papers"):
+             papers.append(BioRxivPaper(p))
+             
+        if debug and len(papers) > 5:
+            papers = papers[:5]
+            
+    except Exception as e:
+        logger.error(f"Error fetching BioRxiv papers: {e}")
+        
+    return papers
 
 
 parser = argparse.ArgumentParser(description='Recommender system for academic papers')
@@ -173,6 +212,12 @@ if __name__ == '__main__':
         help="Local output file path",
         default="report.html",
     )
+    add_argument(
+        "--source",
+        type=str,
+        help="Paper source (arxiv, biorxiv)",
+        default="arxiv",
+    )
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
     
@@ -197,10 +242,16 @@ if __name__ == '__main__':
         logger.info(f"Ignoring papers in:\n {args.zotero_ignore}...")
         corpus = filter_corpus(corpus, args.zotero_ignore)
         logger.info(f"Remaining {len(corpus)} papers after filtering.")
-    logger.info("Retrieving Arxiv papers...")
-    papers = get_arxiv_paper(args.arxiv_query, args.debug)
+    
+    if args.source == 'biorxiv':
+        logger.info("Retrieving BioRxiv papers...")
+        papers = get_biorxiv_paper(args.debug)
+    else:
+        logger.info("Retrieving Arxiv papers...")
+        papers = get_arxiv_paper(args.arxiv_query, args.debug)
+        
     if len(papers) == 0:
-        logger.info("No new papers found. Yesterday maybe a holiday and no one submit their work :). If this is not the case, please check the ARXIV_QUERY.")
+        logger.info(f"No new papers found from {args.source}. Yesterday maybe a holiday and no one submit their work :).")
         if not args.send_empty:
           exit(0)
     else:

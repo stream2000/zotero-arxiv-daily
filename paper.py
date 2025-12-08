@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Any
 from functools import cached_property
 from tempfile import TemporaryDirectory
 import arxiv
@@ -12,13 +12,57 @@ from loguru import logger
 import tiktoken
 from contextlib import ExitStack
 from urllib.error import HTTPError
+from abc import ABC, abstractproperty
 
 
+class BasePaper(ABC):
+    _score: Optional[float] = None
 
-class ArxivPaper:
+    @abstractproperty
+    def title(self) -> str:
+        pass
+
+    @abstractproperty
+    def summary(self) -> str:
+        pass
+
+    @abstractproperty
+    def authors(self) -> List[any]: # List of objects with .name attribute
+        pass
+    
+    @property
+    def score(self) -> Optional[float]:
+        return self._score
+
+    @score.setter
+    def score(self, value: float):
+        self._score = value
+
+    @abstractproperty
+    def arxiv_id(self) -> str:
+        pass
+
+    @abstractproperty
+    def pdf_url(self) -> str:
+        pass
+
+    @abstractproperty
+    def code_url(self) -> Optional[str]:
+        pass
+    
+    @abstractproperty
+    def tldr(self) -> str:
+        pass
+
+    @abstractproperty
+    def affiliations(self) -> Optional[List[str]]:
+        pass
+
+
+class ArxivPaper(BasePaper):
     def __init__(self,paper:arxiv.Result):
         self._paper = paper
-        self.score = None
+        self._score = None # Initialize _score for BasePaper property
     
     @property
     def title(self) -> str:
@@ -29,7 +73,7 @@ class ArxivPaper:
         return self._paper.summary
     
     @property
-    def authors(self) -> list[str]:
+    def authors(self) -> List[Any]: # objects returned by arxiv.Result.authors have .name
         return self._paper.authors
     
     @cached_property
@@ -254,3 +298,76 @@ class ArxivPaper:
                 logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: {e}")
                 return None
             return affiliations
+
+
+class SimpleAuthor:
+    def __init__(self, name):
+        self.name = name.strip()
+
+
+class BioRxivPaper(BasePaper):
+    def __init__(self, paper_data: dict):
+        self._paper = paper_data
+        self._score = None
+
+    @property
+    def title(self) -> str:
+        return self._paper['title']
+
+    @property
+    def summary(self) -> str:
+        return self._paper['abstract']
+
+    @property
+    def authors(self) -> List[SimpleAuthor]:
+        raw = self._paper.get('authors', '')
+        # Split by semicolon
+        names = raw.split(';')
+        return [SimpleAuthor(n) for n in names if n.strip()]
+
+    @property
+    def arxiv_id(self) -> str:
+        return self._paper['doi']
+
+    @property
+    def pdf_url(self) -> str:
+        # Construct PDF URL: https://www.biorxiv.org/content/10.1101/2023.03.20.533581v1.full.pdf
+        return f"https://www.biorxiv.org/content/{self._paper['doi']}v1.full.pdf"
+
+    @property
+    def code_url(self) -> Optional[str]:
+        return None
+
+    @property
+    def tldr(self) -> str:
+        llm = get_llm()
+        prompt = """Given the title and abstract of a paper, generate a one-sentence TLDR summary in __LANG__:
+        
+        Title: __TITLE__
+        Abstract: __ABSTRACT__
+        """
+        prompt = prompt.replace('__LANG__', llm.lang)
+        prompt = prompt.replace('__TITLE__', self.title)
+        prompt = prompt.replace('__ABSTRACT__', self.summary)
+
+        # use gpt-4o tokenizer for estimation
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        prompt_tokens = enc.encode(prompt)
+        prompt_tokens = prompt_tokens[:4000]
+        prompt = enc.decode(prompt_tokens)
+        
+        tldr = llm.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an assistant who perfectly summarizes scientific paper, and gives the core idea of the paper to the user.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+        return tldr
+
+    @property
+    def affiliations(self) -> Optional[List[str]]:
+        return None
+

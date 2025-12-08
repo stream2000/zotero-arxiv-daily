@@ -1,4 +1,4 @@
-from paper import ArxivPaper
+from paper import BasePaper
 import math
 from tqdm import tqdm
 from email.header import Header
@@ -118,7 +118,7 @@ def get_stars(score:float):
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
 
-def render_email(papers:list[ArxivPaper]):
+def render_email(papers:list[BasePaper]):
     parts = []
     if len(papers) == 0 :
         return framework.replace('__CONTENT__', get_empty_html())
