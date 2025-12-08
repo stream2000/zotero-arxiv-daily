@@ -18,5 +18,13 @@ dependencies = [
     "feedparser>=6.0.11",
     "httpx[socks]>=0.28.1",
     "faiss-cpu>=1.7.4",
-    "numpy>=1.26.0",
+    "numpy<2",
+    "pandas>=2.2.2",
+    "pymed-paperscraper>=1.0.0",
 ]
+
+[tool.setuptools]
+py-modules = ["main", "biorxiv_client", "determine_interests", "llm", "paper", "recommender", "report", "storage"]
+
+[tool.pytest.ini_options]
+norecursedirs = ["paperscraper"]

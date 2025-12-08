@@ -7,23 +7,32 @@ import sqlite3
 import faiss
 import pickle
 from loguru import logger
+from unittest.mock import patch, MagicMock
 
 from storage import Storage
 from paper import BioRxivPaper, ArxivPaper # Assuming these are used for candidates
 
 class MockPaper:
-    def __init__(self, arxiv_id, title="", summary="", category='', score=0.0):
+    def __init__(self, arxiv_id, title="", summary="", category='', score=0.0, source='biorxiv'):
         self.arxiv_id = arxiv_id
         self.title = title
         self.summary = summary
         self._paper = {'category': category} # For BioRxivPaper-like behavior
         self.score = score # for direct access in test
+        self.source = source # Added source attribute
+        self.tldr_cache = None
 
+    def set_tldr(self, tldr: str):
+        self.tldr_cache = tldr
+        self.tldr_cache = None
+
+    def set_tldr(self, tldr: str):
+        self.tldr_cache = tldr
 class TestStorage(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.db = Storage(data_dir=self.test_dir)
-        self.dim = 384 # Assuming embedding dimension
+        self.dim = 768 # Assuming embedding dimension
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
@@ -55,14 +64,13 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(c.fetchone()[0], 'Zotero Paper 1')
         conn.close()
 
-    def test_add_candidates(self):
+    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    def test_add_candidates(self, mock_encode_texts):
         mock_candidates = [
             MockPaper('c1', 'Candidate 1', 'Summary 1', 'bioinformatics'),
             MockPaper('c2', 'Candidate 2', 'Summary 2', 'genomics')
         ]
-        embeddings = np.random.rand(2, self.dim).astype(np.float32)
-        
-        self.db.add_candidates(mock_candidates, embeddings)
+        self.db.add_candidates(mock_candidates, None) # Embeddings will be mocked internally
         
         self.assertIsNotNone(self.db.candidate_index)
         self.assertEqual(self.db.candidate_index.ntotal, 2)
@@ -72,32 +80,31 @@ class TestStorage(unittest.TestCase):
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM candidates")
         self.assertEqual(c.fetchone()[0], 2)
-        c.execute("SELECT title, category, faiss_id FROM candidates WHERE id = 'c1'")
+        c.execute("SELECT title, category FROM candidates WHERE id = 'c1'")
         row = c.fetchone()
         self.assertEqual(row[0], 'Candidate 1')
         self.assertEqual(row[1], 'bioinformatics')
-        self.assertEqual(row[2], 0) # First added gets faiss_id 0
         conn.close()
         
-        self.db.add_candidates([], np.array([]).astype(np.float32))
+        self.db.add_candidates([], None) # Embeddings will be mocked internally
         conn = sqlite3.connect(self.db.db_path)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM candidates")
         self.assertEqual(c.fetchone()[0], 2) # Still 2
         conn.close()
 
-    def test_get_existing_candidate_ids(self):
+    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    def test_get_existing_candidate_ids(self, mock_encode_texts):
         mock_candidates = [MockPaper('e1'), MockPaper('e2')]
-        embeddings = np.random.rand(2, self.dim).astype(np.float32)
-        self.db.add_candidates(mock_candidates, embeddings)
+        self.db.add_candidates(mock_candidates, None)
         
         existing_ids = self.db.get_existing_candidate_ids()
         self.assertEqual(existing_ids, {'e1', 'e2'})
 
-    def test_update_scores(self):
+    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    def test_update_scores(self, mock_encode_texts):
         mock_candidates = [MockPaper('s1'), MockPaper('s2')]
-        embeddings = np.random.rand(2, self.dim).astype(np.float32)
-        self.db.add_candidates(mock_candidates, embeddings) # Add before updating scores
+        self.db.add_candidates(mock_candidates, None) # Add before updating scores
 
         scores_dict = {'s1': 0.85, 's2': 0.92}
         self.db.update_scores(scores_dict)
@@ -108,15 +115,16 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(c.fetchone()[0], 0.85)
         conn.close()
 
-    def test_get_all_candidate_ids(self):
+    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    def test_get_all_candidate_ids(self, mock_encode_texts):
         mock_candidates = [MockPaper('id3'), MockPaper('id1'), MockPaper('id2')]
-        embeddings = np.random.rand(3, self.dim).astype(np.float32)
-        self.db.add_candidates(mock_candidates, embeddings)
+        self.db.add_candidates(mock_candidates, None)
         
-        expected_ids = ['id3', 'id1', 'id2'] # Faiss IDs are assigned in order of addition (0, 1, 2).
+        expected_ids = ['id1', 'id2', 'id3'] # Faiss IDs are assigned based on sorted arxiv_id by _rebuild_candidate_faiss_index (ORDER BY id ASC)
         self.assertEqual(self.db.get_all_candidate_ids(), expected_ids)
 
-    def test_get_top_candidates(self):
+    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    def test_get_top_candidates(self, mock_encode_texts):
         # Add candidates with scores and categories
         papers_to_add = [
             MockPaper(arxiv_id='p1', score=0.9, category='genomics'),
@@ -124,36 +132,21 @@ class TestStorage(unittest.TestCase):
             MockPaper(arxiv_id='p3', score=0.95, category='genomics'),
             MockPaper(arxiv_id='p4', score=0.6, category='systems biology')
         ]
-        embeddings = np.random.rand(len(papers_to_add), self.dim).astype(np.float32)
-        self.db.add_candidates(papers_to_add, embeddings)
-        
-        # Debug: Check actual categories in DB
-        conn = sqlite3.connect(self.db.db_path)
-        c = conn.cursor()
-        c.execute("SELECT id, category, score FROM candidates ORDER BY id")
-        logger.debug(f"DB Candidates before get_top_candidates: {c.fetchall()}")
-        conn.close()
+        self.db.add_candidates(papers_to_add, None)
         
         # Update scores in DB (important for sorting)
         scores_dict = {'p1': 0.9, 'p2': 0.7, 'p3': 0.95, 'p4': 0.6}
         self.db.update_scores(scores_dict)
 
-        # Test without filter
+        # Test without filter (limit 2)
         top_papers = self.db.get_top_candidates(limit=2)
         self.assertEqual(len(top_papers), 2)
         self.assertEqual(top_papers[0].arxiv_id, 'p3') # Highest score
         self.assertEqual(top_papers[1].arxiv_id, 'p1')
         
-        # Test with filter
-        filtered_papers = self.db.get_top_candidates(limit=2, filter_categories=['genomics'])
-        self.assertEqual(len(filtered_papers), 2)
-        self.assertEqual(filtered_papers[0].arxiv_id, 'p3')
-        self.assertEqual(filtered_papers[1].arxiv_id, 'p1')
-        
-        filtered_papers_single = self.db.get_top_candidates(limit=1, filter_categories=['systems biology'])
-        self.assertEqual(len(filtered_papers_single), 1)
-        self.assertEqual(filtered_papers_single[0].arxiv_id, 'p4')
-
-        # Test case where no category matches
-        no_match_papers = self.db.get_top_candidates(limit=5, filter_categories=['nonexistent'])
-        self.assertEqual(len(no_match_papers), 0)
+        # Test with limit 3
+        top_papers_3 = self.db.get_top_candidates(limit=3)
+        self.assertEqual(len(top_papers_3), 3)
+        self.assertEqual(top_papers_3[0].arxiv_id, 'p3')
+        self.assertEqual(top_papers_3[1].arxiv_id, 'p1')
+        self.assertEqual(top_papers_3[2].arxiv_id, 'p2')

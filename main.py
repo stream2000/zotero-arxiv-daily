@@ -12,9 +12,10 @@ from gitignore_parser import parse_gitignore
 from loguru import logger
 from pyzotero import zotero
 from tqdm import tqdm
+import re
 
 from biorxiv_client import BioRxivApi
-from construct_email import render_email, send_email
+from report import generate_report, send_email
 from llm import set_global_llm
 from paper import ArxivPaper, BioRxivPaper
 from recommender import encode_texts, calculate_scores
@@ -109,30 +110,31 @@ def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
     return papers
 
 
-def get_biorxiv_paper(filter_category: str = None, days: int = 1, debug: bool = False) -> list[BioRxivPaper]:
+def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False):
     """
-    Fetch papers from BioRxiv for the specified number of past days.
-    Supports parallel fetching by day and client-side category filtering.
+    Fetches and stores new papers from BioRxiv for the specified number of past days.
+    It checks for already completed dates and processes each new day atomically.
     """
     api = BioRxivApi()
     end_date = datetime.now()
+    today_str = end_date.strftime("%Y-%m-%d")
     start_date = end_date - timedelta(days=days)
 
-    # Generate list of daily query dates (YYYY-MM-DD)
-    dates_to_fetch = []
+    dates_candidate = []
     delta = (end_date - start_date).days
     for i in range(delta + 1):
         d = start_date + timedelta(days=i)
-        dates_to_fetch.append(d.strftime("%Y-%m-%d"))
+        dates_candidate.append(d.strftime("%Y-%m-%d"))
+    dates_candidate = sorted(list(set(dates_candidate)))
 
-    dates_to_fetch = sorted(list(set(dates_to_fetch)))
+    completed_dates = db.get_biorxiv_completed_dates()
+    dates_to_fetch = [d for d in dates_candidate if d != today_str and d not in completed_dates]
 
-    start_str = dates_to_fetch[0]
-    end_str = dates_to_fetch[-1]
-    
-    logger.info(f"Retrieving BioRxiv papers from {start_str} to {end_str} ({len(dates_to_fetch)} days) using parallel queries...")
+    if not dates_to_fetch:
+        logger.info("No new dates to sync for BioRxiv (all requested dates are today or already completed).")
+        return
 
-    raw_papers = []
+    logger.info(f"Syncing BioRxiv papers for {len(dates_to_fetch)} days: {dates_to_fetch}")
 
     def fetch_papers_for_date(date_str: str) -> list[dict]:
         """Fetch BioRxiv metadata for a single date."""
@@ -140,34 +142,39 @@ def get_biorxiv_paper(filter_category: str = None, days: int = 1, debug: bool = 
             return list(api.get_papers(start_date=date_str, end_date=date_str))
         except Exception as e:
             logger.error(f"Error fetching papers for {date_str}: {e}")
-            return []
+            raise e
 
-    # Parallel Fetching
     max_workers = min(10, len(dates_to_fetch))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_date = {executor.submit(fetch_papers_for_date, d): d for d in dates_to_fetch}
         for future in concurrent.futures.as_completed(future_to_date):
-            d = future_to_date[future]
+            date_str = future_to_date[future]
             try:
-                papers = future.result()
-                raw_papers.extend(papers)
-                logger.debug(f"Fetched {len(papers)} papers for {d}")
+                raw_papers_for_day = future.result()
+
+                if not raw_papers_for_day:
+                    logger.info(f"No papers found for {date_str}, marking as completed.")
+                    db.mark_biorxiv_date_completed(date_str)
+                    continue
+                
+                paper_objects = [BioRxivPaper(p) for p in raw_papers_for_day]
+                unique_papers = {p.arxiv_id: p for p in paper_objects}
+                existing_ids = db.get_existing_candidate_ids()
+                new_papers_for_day = [p for p in unique_papers.values() if p.arxiv_id not in existing_ids]
+
+                if new_papers_for_day:
+                    logger.info(f"Found {len(new_papers_for_day)} new papers for {date_str}. Storing in DB.")
+                    new_texts = [p.summary for p in new_papers_for_day]
+                    new_embeddings = encode_texts(new_texts)
+                    db.add_candidates(new_papers_for_day, new_embeddings)
+                else:
+                    logger.info(f"All papers for {date_str} already exist in DB.")
+                
+                db.mark_biorxiv_date_completed(date_str)
+                logger.success(f"Successfully synced papers for {date_str}.")
+
             except Exception as e:
-                logger.error(f"Exception processing results for {d}: {e}")
-
-    # Client-side Category Filtering
-    if filter_category:
-        target_categories = [c.strip().lower() for c in filter_category.split(',')]
-        logger.info(f"Filtering papers by categories: {target_categories}")
-        
-        raw_papers = [
-            p for p in raw_papers
-            if p.get('category') and any(cat in p['category'].lower() for cat in target_categories)
-        ]
-
-    logger.info(f"Found {len(raw_papers)} papers.")
-
-    return [BioRxivPaper(p) for p in tqdm(raw_papers, desc="Processing BioRxiv papers")]
+                logger.error(f"Failed to process papers for {date_str}: {e}. It will be retried on the next run.")
 
 
 parser = argparse.ArgumentParser(description='Recommender system for academic papers')
@@ -265,7 +272,7 @@ if __name__ == '__main__':
         help="Filter BioRxiv papers by category",
         default=None,
     )
-    add_argument('--days', type=int, help='Number of past days to fetch papers from', default=1)
+    add_argument('--days', type=int, help='Number of past days to fetch papers from', default=4)
     add_argument('--enable_email', type=bool, help='Enable email sending', default=False)
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
@@ -286,6 +293,7 @@ if __name__ == '__main__':
 
     # Initialize Storage
     db = Storage()
+    logger.debug(f"Storage instance created for data directory: {db.data_dir}")
 
     logger.info("Retrieving Zotero corpus...")
     corpus = get_zotero_corpus(args.zotero_id, args.zotero_key)
@@ -298,65 +306,93 @@ if __name__ == '__main__':
         corpus = filter_corpus(corpus, args.zotero_ignore)
         logger.info(f"Remaining {len(corpus)} papers after filtering.")
 
-    # Update Zotero Embeddings in DB
-    logger.info("Updating Zotero embeddings in local DB...")
+    # Always update Zotero embeddings for consistency
+    logger.info("Updating Zotero embeddings for this run...")
     zotero_texts = [c['data']['abstractNote'] for c in corpus]
     zotero_embeddings = encode_texts(zotero_texts)
+    # The DB update for Zotero is a full wipe-and-replace, which is fine for consistency.
     db.update_zotero(corpus, zotero_embeddings)
 
-    # Retrieve and Store New Candidates
+    # --- Sync/Fetch new papers ---
     if args.source == 'biorxiv':
-        logger.info("Retrieving BioRxiv papers...")
-        fetched_papers = get_biorxiv_paper(args.biorxiv_category, args.days, args.debug)
-    else:
+        logger.info(f"Syncing BioRxiv papers for the last {args.days} days...")
+        sync_biorxiv_papers(db, args.days, args.debug)
+        logger.info("BioRxiv sync complete.")
+        
+    elif args.source == 'arxiv':
         logger.info("Retrieving Arxiv papers...")
         fetched_papers = get_arxiv_paper(args.arxiv_query, args.debug)
 
-    if len(fetched_papers) == 0:
-        logger.info(f"No new papers fetched from {args.source}.")
-    else:
-        # Filter out existing candidates to avoid re-encoding
-        existing_ids = db.get_existing_candidate_ids()
-        new_papers = [p for p in fetched_papers if p.arxiv_id not in existing_ids]
-        
-        if len(new_papers) > 0:
-            logger.info(f"Encoding {len(new_papers)} new candidates...")
-            new_texts = [p.summary for p in new_papers]
-            new_embeddings = encode_texts(new_texts)
-            db.add_candidates(new_papers, new_embeddings)
+        if len(fetched_papers) == 0:
+            logger.info(f"No new papers fetched from {args.source}.")
         else:
-            logger.info("All fetched papers already exist in DB.")
+            # Deduplicate fetched papers
+            unique_papers = {p.arxiv_id: p for p in fetched_papers}
+            existing_ids = db.get_existing_candidate_ids()
+            new_papers = [p for p in unique_papers.values() if p.arxiv_id not in existing_ids]
+            
+            if len(new_papers) > 0:
+                logger.info(f"Encoding {len(new_papers)} new candidates...")
+                new_texts = [p.summary for p in new_papers]
+                new_embeddings = encode_texts(new_texts)
+                db.add_candidates(new_papers, new_embeddings)
+            else:
+                logger.info("All fetched papers already exist in DB.")
 
-    # Scoring (Re-score all candidates against current Zotero)
-    logger.info("Calculating relevance scores based on local DB...")
+    # --- In-Memory Scoring and Filtering ---
+    logger.info("Scoring all candidates against current Zotero library...")
     
-    # Get all embeddings from DB
-    cand_embeddings = db.get_candidate_embeddings()
-    zotero_embeddings = db.get_zotero_embeddings()
+    # Determine date range for candidates to be scored
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=args.days)
     
-    if cand_embeddings is not None and zotero_embeddings is not None:
-        scores = calculate_scores(cand_embeddings, zotero_embeddings)
-        all_ids = db.get_all_candidate_ids()
-        
-        if len(all_ids) == len(scores):
-            scores_dict = dict(zip(all_ids, scores))
-            db.update_scores(scores_dict)
-            logger.info("Scores updated.")
-        else:
-            logger.error(f"Mismatch in IDs ({len(all_ids)}) and scores ({len(scores)}).")
+    # 1. Get relevant candidate papers from the DB within the date range
+    # These papers already have their tldr and score potentially loaded
+    candidates_from_db = db.get_candidates_by_date_range(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+    logger.info(f"Retrieved {len(candidates_from_db)} candidates from DB for the last {args.days} days.")
 
-    # Generate Report from DB
-    logger.info("Generating report from local DB...")
-    
-    # Get top papers from DB
-    filter_categories = None
+    # 2. In-memory category filtering for BioRxiv
     if args.source == 'biorxiv' and args.biorxiv_category:
-        filter_categories = [c.strip().lower() for c in args.biorxiv_category.split(',')]
+        target_categories = {c.strip().lower() for c in args.biorxiv_category.split(',')}
+        logger.info(f"Filtering {len(candidates_from_db)} candidates in-memory by categories: {target_categories}")
         
-    papers = db.get_top_candidates(limit=args.max_paper_num, filter_categories=filter_categories)
+        candidates_to_score = []
+        for p in candidates_from_db:
+            if p.source != 'biorxiv': # Keep non-biorxiv papers
+                candidates_to_score.append(p)
+                continue
+
+            paper_categories_raw = p._paper.get('category')
+            if paper_categories_raw:
+                paper_categories = {pc.strip().lower() for pc in re.split(r'[;,]', paper_categories_raw) if pc.strip()}
+                if any(tc in paper_categories for tc in target_categories):
+                    candidates_to_score.append(p)
+        logger.info(f"Kept {len(candidates_to_score)} candidates for scoring after in-memory filtering.")
+    else:
+        candidates_to_score = candidates_from_db
+
+    # 3. Full embedding calculation for scoring
+    if candidates_to_score:
+        candidate_texts = [p.summary for p in candidates_to_score]
+        candidate_embeddings = encode_texts(candidate_texts)
+        
+        scores = calculate_scores(candidate_embeddings, zotero_embeddings)
+        
+        for p, score in zip(candidates_to_score, scores):
+            p.score = score
+        
+        # Update scores in DB (optional, but good for reference)
+        scores_dict = {p.arxiv_id: p.score for p in candidates_to_score}
+        db.update_scores(scores_dict)
+        logger.info("Scores updated in DB.")
+
+        # Sort for the report
+        papers_for_report = sorted(candidates_to_score, key=lambda p: p.score, reverse=True)[:args.max_paper_num]
+    else:
+        papers_for_report = []
     
-    if len(papers) == 0:
-         logger.info("No relevant papers found in DB to report.")
+    if not papers_for_report:
+         logger.info("No relevant papers found to report.")
          if not args.send_empty:
             exit(0)
     
@@ -372,7 +408,7 @@ if __name__ == '__main__':
         logger.info("Using Local LLM as global LLM.")
         set_global_llm(lang=args.language)
 
-    html = render_email(papers)
+    html = generate_report(papers_for_report, db)
 
     if args.output_file:
         with open(args.output_file, 'w', encoding='utf-8') as f:
