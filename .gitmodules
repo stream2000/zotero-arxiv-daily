@@ -1,0 +1,3 @@
+[submodule "paperscraper"]
+	path = paperscraper
+	url = git@github.com:jannisborn/paperscraper.git
