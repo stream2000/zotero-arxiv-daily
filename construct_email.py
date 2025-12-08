@@ -8,11 +8,13 @@ import smtplib
 import datetime
 import time
 from loguru import logger
+import concurrent.futures # Added for concurrency
 
 framework = """
 <!DOCTYPE HTML>
 <html>
 <head>
+  <meta charset="utf-8">
   <style>
     .star-wrapper {
       font-size: 1.3em; /* 调整星星大小 */
@@ -117,30 +119,44 @@ def get_stars(score:float):
         half_star_num = star_num - full_star_num * 2
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
+def _render_single_paper_block(p: BasePaper):
+    """Helper function to render a single paper block, including TLDR generation."""
+    rate = get_stars(p.score)
+    author_list = [a.name for a in p.authors]
+    num_authors = len(author_list)
+    
+    if num_authors <= 5:
+        authors = ', '.join(author_list)
+    else:
+        authors = ', '.join(author_list[:3] + ['...'] + author_list[-2:])
+    
+    affiliations_str = 'Unknown Affiliation'
+    if p.affiliations is not None:
+        affiliations_str = p.affiliations[:5]
+        affiliations_str = ', '.join(affiliations_str)
+        if len(p.affiliations) > 5:
+            affiliations_str += ', ...'
+            
+    # Access p.tldr here to trigger LLM call if not cached yet
+    return get_block_html(p.title, authors, rate, p.arxiv_id, p.tldr, p.pdf_url, p.code_url, affiliations_str)
 
 def render_email(papers:list[BasePaper]):
-    parts = []
     if len(papers) == 0 :
         return framework.replace('__CONTENT__', get_empty_html())
     
-    for p in tqdm(papers,desc='Rendering Email'):
-        rate = get_stars(p.score)
-        author_list = [a.name for a in p.authors]
-        num_authors = len(author_list)
-        
-        if num_authors <= 5:
-            authors = ', '.join(author_list)
-        else:
-            authors = ', '.join(author_list[:3] + ['...'] + author_list[-2:])
-        if p.affiliations is not None:
-            affiliations = p.affiliations[:5]
-            affiliations = ', '.join(affiliations)
-            if len(p.affiliations) > 5:
-                affiliations += ', ...'
-        else:
-            affiliations = 'Unknown Affiliation'
-        parts.append(get_block_html(p.title, authors,rate,p.arxiv_id ,p.tldr, p.pdf_url, p.code_url, affiliations))
-        time.sleep(10)
+    parts = []
+    # User requested 16 threads for concurrent rendering
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        # Map _render_single_paper_block to each paper, with tqdm for progress
+        # as_completed yields results as they finish, maintaining responsiveness
+        futures = {executor.submit(_render_single_paper_block, p): p for p in papers}
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(papers), desc='Rendering Email (concurrently)'):
+            try:
+                parts.append(future.result())
+            except Exception as exc:
+                logger.error(f'Paper block generation generated an exception: {exc}')
+                # Optionally append a placeholder or log the error to the email content
+                parts.append(get_block_html("Error rendering paper", "N/A", "", "N/A", f"Error: {exc}", "#", "#", ""))
 
     content = '<br>' + '</br><br>'.join(parts) + '</br>'
     return framework.replace('__CONTENT__', content)

@@ -5,6 +5,7 @@ import arxiv
 import tarfile
 import re
 import time
+import json
 from llm import get_llm
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -27,9 +28,9 @@ class BasePaper(ABC):
         pass
 
     @abstractproperty
-    def authors(self) -> List[any]: # List of objects with .name attribute
+    def authors(self) -> List[any]:  # List of objects with .name attribute
         pass
-    
+
     @property
     def score(self) -> Optional[float]:
         return self._score
@@ -49,7 +50,7 @@ class BasePaper(ABC):
     @abstractproperty
     def code_url(self) -> Optional[str]:
         pass
-    
+
     @abstractproperty
     def tldr(self) -> str:
         pass
@@ -60,40 +61,40 @@ class BasePaper(ABC):
 
 
 class ArxivPaper(BasePaper):
-    def __init__(self,paper:arxiv.Result):
+    def __init__(self, paper: arxiv.Result):
         self._paper = paper
-        self._score = None # Initialize _score for BasePaper property
-    
+        self._score = None  # Initialize _score for BasePaper property
+
     @property
     def title(self) -> str:
         return self._paper.title
-    
+
     @property
     def summary(self) -> str:
         return self._paper.summary
-    
+
     @property
-    def authors(self) -> List[Any]: # objects returned by arxiv.Result.authors have .name
+    def authors(self) -> List[Any]:  # objects returned by arxiv.Result.authors have .name
         return self._paper.authors
-    
+
     @cached_property
     def arxiv_id(self) -> str:
         return re.sub(r'v\d+$', '', self._paper.get_short_id())
-    
+
     @property
     def pdf_url(self) -> str:
         if self._paper.pdf_url is not None:
             return self._paper.pdf_url
-        
+
         pdf_url = f"https://arxiv.org/pdf/{self.arxiv_id}.pdf"
         if self._paper.links is not None:
-            pdf_url = self._paper.links[0].href.replace('abs','pdf')
+            pdf_url = self._paper.links[0].href.replace('abs', 'pdf')
 
         ## Assign pdf_url to self._paper.pdf_url for pdf downloading (Issue #119)
         self._paper.pdf_url = pdf_url
 
         return pdf_url
-    
+
     @cached_property
     def code_url(self) -> Optional[str]:
         s = requests.Session()
@@ -105,7 +106,7 @@ class ArxivPaper(BasePaper):
             logger.debug(f'Error when searching {self.arxiv_id}: {e}')
             return None
 
-        if paper_list.get('count',0) == 0:
+        if paper_list.get('count', 0) == 0:
             return None
         paper_id = paper_list['results'][0]['id']
 
@@ -114,12 +115,12 @@ class ArxivPaper(BasePaper):
         except Exception as e:
             logger.debug(f'Error when searching {self.arxiv_id}: {e}')
             return None
-        if repo_list.get('count',0) == 0:
+        if repo_list.get('count', 0) == 0:
             return None
         return repo_list['results'][0]['url']
-    
+
     @cached_property
-    def tex(self) -> dict[str,str]:
+    def tex(self) -> dict[str, str]:
         with ExitStack() as stack:
             tmpdirname = stack.enter_context(TemporaryDirectory())
             # file = self._paper.download_source(dirpath=tmpdirname)
@@ -131,11 +132,11 @@ class ArxivPaper(BasePaper):
                 if e.code == 404:
                     # 如果是 404 Not Found，说明源文件不存在，这是正常情况
                     logger.warning(f"Source for {self.arxiv_id} not found (404). Skipping source analysis.")
-                    return None # 直接返回 None，后续依赖 tex 的代码会安全地处理
+                    return None  # 直接返回 None，后续依赖 tex 的代码会安全地处理
                 else:
                     # 如果是其他 HTTP 错误 (如 503)，这可能是临时性问题，值得记录下来
                     logger.error(f"HTTP Error {e.code} when downloading source for {self.arxiv_id}: {e.reason}")
-                    raise # 重新抛出异常，因为这可能是个需要关注的严重问题
+                    raise  # 重新抛出异常，因为这可能是个需要关注的严重问题
             except Exception as e:
                 logger.error(f"Error when downloading source for {self.arxiv_id}: {e}")
                 return None
@@ -144,54 +145,59 @@ class ArxivPaper(BasePaper):
             except tarfile.ReadError:
                 logger.debug(f"Failed to find main tex file of {self.arxiv_id}: Not a tar file.")
                 return None
- 
+
             tex_files = [f for f in tar.getnames() if f.endswith('.tex')]
             if len(tex_files) == 0:
                 logger.debug(f"Failed to find main tex file of {self.arxiv_id}: No tex file.")
                 return None
-            
+
             bbl_file = [f for f in tar.getnames() if f.endswith('.bbl')]
-            match len(bbl_file) :
+            match len(bbl_file):
                 case 0:
                     if len(tex_files) > 1:
-                        logger.debug(f"Cannot find main tex file of {self.arxiv_id} from bbl: There are multiple tex files while no bbl file.")
+                        logger.debug(
+                            f"Cannot find main tex file of {self.arxiv_id} from bbl: There are multiple tex files while no bbl file.")
                         main_tex = None
                     else:
                         main_tex = tex_files[0]
                 case 1:
-                    main_name = bbl_file[0].replace('.bbl','')
+                    main_name = bbl_file[0].replace('.bbl', '')
                     main_tex = f"{main_name}.tex"
                     if main_tex not in tex_files:
-                        logger.debug(f"Cannot find main tex file of {self.arxiv_id} from bbl: The bbl file does not match any tex file.")
+                        logger.debug(
+                            f"Cannot find main tex file of {self.arxiv_id} from bbl: The bbl file does not match any tex file.")
                         main_tex = None
                 case _:
-                    logger.debug(f"Cannot find main tex file of {self.arxiv_id} from bbl: There are multiple bbl files.")
+                    logger.debug(
+                        f"Cannot find main tex file of {self.arxiv_id} from bbl: There are multiple bbl files.")
                     main_tex = None
             if main_tex is None:
-                logger.debug(f"Trying to choose tex file containing the document block as main tex file of {self.arxiv_id}")
-            #read all tex files
+                logger.debug(
+                    f"Trying to choose tex file containing the document block as main tex file of {self.arxiv_id}")
+            # read all tex files
             file_contents = {}
             for t in tex_files:
                 f = tar.extractfile(t)
-                content = f.read().decode('utf-8',errors='ignore')
-                #remove comments
+                content = f.read().decode('utf-8', errors='ignore')
+                # remove comments
                 content = re.sub(r'%.*\n', '\n', content)
                 content = re.sub(r'\\begin{comment}.*?\\end{comment}', '', content, flags=re.DOTALL)
                 content = re.sub(r'\\iffalse.*?\\fi', '', content, flags=re.DOTALL)
-                #remove redundant \n
+                # remove redundant \n
                 content = re.sub(r'\n+', '\n', content)
                 content = re.sub(r'\\\\', '', content)
-                #remove consecutive spaces
+                # remove consecutive spaces
                 content = re.sub(r'[ \t\r\f]{3,}', ' ', content)
                 if main_tex is None and re.search(r'\\begin\{document\}', content):
                     main_tex = t
                     logger.debug(f"Choose {t} as main tex file of {self.arxiv_id}")
                 file_contents[t] = content
-            
+
             if main_tex is not None:
-                main_source:str = file_contents[main_tex]
-                #find and replace all included sub-files
-                include_files = re.findall(r'\\input\{(.+?)\}', main_source) + re.findall(r'\\include\{(.+?)\}', main_source)
+                main_source: str = file_contents[main_tex]
+                # find and replace all included sub-files
+                include_files = re.findall(r'\\input\{(.+?)\}', main_source) + re.findall(r'\\include\{(.+?)\}',
+                                                                                          main_source)
                 for f in include_files:
                     if not f.endswith('.tex'):
                         file_name = f + '.tex'
@@ -200,10 +206,11 @@ class ArxivPaper(BasePaper):
                     main_source = main_source.replace(f'\\input{{{f}}}', file_contents.get(file_name, ''))
                 file_contents["all"] = main_source
             else:
-                logger.debug(f"Failed to find main tex file of {self.arxiv_id}: No tex file containing the document block.")
+                logger.debug(
+                    f"Failed to find main tex file of {self.arxiv_id}: No tex file containing the document block.")
                 file_contents["all"] = None
         return file_contents
-    
+
     @cached_property
     def tldr(self) -> str:
         introduction = ""
@@ -212,41 +219,49 @@ class ArxivPaper(BasePaper):
             content = self.tex.get("all")
             if content is None:
                 content = "\n".join(self.tex.values())
-            #remove cite
+            # remove cite
             content = re.sub(r'~?\\cite.?\{.*?\}', '', content)
-            #remove figure
+            # remove figure
             content = re.sub(r'\\begin\{figure\}.*?\\end\{figure\}', '', content, flags=re.DOTALL)
-            #remove table
+            # remove table
             content = re.sub(r'\\begin\{table\}.*?\\end\{table\}', '', content, flags=re.DOTALL)
-            #find introduction and conclusion
+            # find introduction and conclusion
             # end word can be \section or \end{document} or \bibliography or \appendix
-            match = re.search(r'\\section\{Introduction\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)', content, flags=re.DOTALL)
+            match = re.search(r'\\section\{Introduction\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)',
+                              content, flags=re.DOTALL)
             if match:
                 introduction = match.group(0)
-            match = re.search(r'\\section\{Conclusion\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)', content, flags=re.DOTALL)
+            match = re.search(r'\\section\{Conclusion\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)',
+                              content, flags=re.DOTALL)
             if match:
                 conclusion = match.group(0)
         llm = get_llm()
-        prompt = """Given the title, abstract, introduction and the conclusion (if any) of a paper in latex format, generate a one-sentence TLDR summary in __LANG__:
-        
-        \\title{__TITLE__}
-        \\begin{abstract}__ABSTRACT__\\end{abstract}
-        __INTRODUCTION__
-        __CONCLUSION__
-        """
-        prompt = prompt.replace('__LANG__', llm.lang)
-        prompt = prompt.replace('__TITLE__', self.title)
-        prompt = prompt.replace('__ABSTRACT__', self.summary)
-        prompt = prompt.replace('__INTRODUCTION__', introduction)
-        prompt = prompt.replace('__CONCLUSION__', conclusion)
+        prompt = """Given the title, abstract, introduction and the conclusion (if any) of a paper, generate a JSON object with three keys:
+"title_zh": Translate the title to Chinese.
+"tldr_en": A one-sentence TLDR summary in English.
+"tldr_zh": A one-sentence TLDR summary in Chinese.
+
+Strictly return ONLY the JSON object, no markdown formatting.
+
+Title: {title}
+Abstract: {abstract}
+Introduction: {introduction}
+Conclusion: {conclusion}
+"""
+        prompt = prompt.format(
+            title=self.title,
+            abstract=self.summary,
+            introduction=introduction,
+            conclusion=conclusion
+        )
 
         # use gpt-4o tokenizer for estimation
         enc = tiktoken.encoding_for_model("gpt-4o")
         prompt_tokens = enc.encode(prompt)
         prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
         prompt = enc.decode(prompt_tokens)
-        
-        tldr = llm.generate(
+
+        response = llm.generate(
             messages=[
                 {
                     "role": "system",
@@ -255,7 +270,14 @@ class ArxivPaper(BasePaper):
                 {"role": "user", "content": prompt},
             ]
         )
-        return tldr
+        try:
+            cleaned_response = response.replace('```json', '').replace('```', '').strip()
+            data = json.loads(cleaned_response)
+            final_tldr = f"<b>{data.get('title_zh', '')}</b><br><br><b>TLDR (EN):</b> {data.get('tldr_en', '')}<br><br><b>TLDR (ZH):</b> {data.get('tldr_zh', '')}"
+            return final_tldr
+        except Exception as e:
+            logger.error(f"Failed to parse LLM JSON response: {e}. Response: {response}")
+            return response
 
     @cached_property
     def affiliations(self) -> Optional[list[str]]:
@@ -263,8 +285,8 @@ class ArxivPaper(BasePaper):
             content = self.tex.get("all")
             if content is None:
                 content = "\n".join(self.tex.values())
-            #search for affiliations
-            possible_regions = [r'\\author.*?\\maketitle',r'\\begin{document}.*?\\begin{abstract}']
+            # search for affiliations
+            possible_regions = [r'\\author.*?\\maketitle', r'\\begin{document}.*?\\begin{abstract}']
             matches = [re.search(p, content, flags=re.DOTALL) for p in possible_regions]
             match = next((m for m in matches if m), None)
             if match:
@@ -341,22 +363,28 @@ class BioRxivPaper(BasePaper):
     @property
     def tldr(self) -> str:
         llm = get_llm()
-        prompt = """Given the title and abstract of a paper, generate a one-sentence TLDR summary in __LANG__:
-        
-        Title: __TITLE__
-        Abstract: __ABSTRACT__
-        """
-        prompt = prompt.replace('__LANG__', llm.lang)
-        prompt = prompt.replace('__TITLE__', self.title)
-        prompt = prompt.replace('__ABSTRACT__', self.summary)
+        prompt = """Given the title and abstract of a paper, generate a JSON object with three keys:
+"title_zh": Translate the title to Chinese.
+"tldr_en": A one-sentence TLDR summary in English.
+"tldr_zh": A one-sentence TLDR summary in Chinese.
+
+Strictly return ONLY the JSON object, no markdown formatting.
+
+Title: {title}
+Abstract: {abstract}
+"""
+        prompt = prompt.format(
+            title=self.title,
+            abstract=self.summary
+        )
 
         # use gpt-4o tokenizer for estimation
         enc = tiktoken.encoding_for_model("gpt-4o")
         prompt_tokens = enc.encode(prompt)
         prompt_tokens = prompt_tokens[:4000]
         prompt = enc.decode(prompt_tokens)
-        
-        tldr = llm.generate(
+
+        response = llm.generate(
             messages=[
                 {
                     "role": "system",
@@ -365,9 +393,15 @@ class BioRxivPaper(BasePaper):
                 {"role": "user", "content": prompt},
             ]
         )
-        return tldr
+        try:
+            cleaned_response = response.replace('```json', '').replace('```', '').strip()
+            data = json.loads(cleaned_response)
+            final_tldr = f"<b>{data.get('title_zh', '')}</b><br><br><b>TLDR (EN):</b> {data.get('tldr_en', '')}<br><br><b>TLDR (ZH):</b> {data.get('tldr_zh', '')}"
+            return final_tldr
+        except Exception as e:
+            logger.error(f"Failed to parse LLM JSON response: {e}. Response: {response}")
+            return response
 
     @property
     def affiliations(self) -> Optional[List[str]]:
         return None
-

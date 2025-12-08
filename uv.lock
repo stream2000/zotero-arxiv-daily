@@ -482,6 +482,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517 },
 ]
 
+[package.optional-dependencies]
+socks = [
+    { name = "socksio" },
+]
+
 [[package]]
 name = "huggingface-hub"
 version = "0.36.0"
@@ -1577,6 +1582,15 @@ wheels = [
 ]
 
 [[package]]
+name = "socksio"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/5c/48a7d9495be3d1c651198fd99dbb6ce190e2274d0f28b9051307bdec6b85/socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac", size = 19055 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/c3/6eeb6034408dac0fa653d126c9204ade96b819c936e136c5e8a6897eee9c/socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3", size = 12763 },
+]
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1925,6 +1939,7 @@ dependencies = [
     { name = "feedparser" },
     { name = "gitignore-parser" },
     { name = "google-generativeai" },
+    { name = "httpx", extra = ["socks"] },
     { name = "loguru" },
     { name = "openai" },
     { name = "python-dotenv" },
@@ -1940,6 +1955,7 @@ requires-dist = [
     { name = "feedparser", specifier = ">=6.0.11" },
     { name = "gitignore-parser", specifier = ">=0.1.11" },
     { name = "google-generativeai", specifier = ">=0.3.2" },
+    { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.2" },
     { name = "openai", specifier = ">=1.57.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },

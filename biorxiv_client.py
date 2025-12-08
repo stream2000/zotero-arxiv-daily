@@ -79,7 +79,7 @@ class XRXivApi:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        fields: List[str] = ["title", "doi", "authors", "abstract", "date", "journal"],
+        fields: List[str] = ["title", "doi", "authors", "abstract", "date", "journal", "category"],
         max_retries: int = 10,
     ) -> Generator:
         try:
