@@ -104,6 +104,8 @@ def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, 
     return block_template.format(title=title, authors=authors,rate=rate,arxiv_id=arxiv_id, abstract=abstract, pdf_url=pdf_url, code=code, affiliations=affiliations)
 
 def get_stars(score:float):
+    if score is None:
+        return '' # Return empty string if score is None
     full_star = '<span class="full-star">⭐</span>'
     half_star = '<span class="half-star">⭐</span>'
     low = 6
@@ -119,8 +121,23 @@ def get_stars(score:float):
         half_star_num = star_num - full_star_num * 2
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
-def _render_single_paper_block(p: BasePaper):
+def _render_single_paper_block(p: BasePaper, db):
     """Helper function to render a single paper block, including TLDR generation."""
+    # Check if TLDR needs to be generated and saved
+    should_save = not p.has_tldr
+    
+    # Accessing p.tldr will generate it if not cached
+    tldr_text = p.tldr 
+    
+    if should_save:
+        # Save to DB
+        # Note: In high concurrency, this might lock the DB file temporarily, 
+        # but sqlite3 handles this with timeouts usually.
+        try:
+            db.update_tldr(p.arxiv_id, tldr_text)
+        except Exception as e:
+            logger.error(f"Failed to save TLDR for {p.arxiv_id}: {e}")
+
     rate = get_stars(p.score)
     author_list = [a.name for a in p.authors]
     num_authors = len(author_list)
@@ -137,28 +154,28 @@ def _render_single_paper_block(p: BasePaper):
         if len(p.affiliations) > 5:
             affiliations_str += ', ...'
             
-    # Access p.tldr here to trigger LLM call if not cached yet
-    return get_block_html(p.title, authors, rate, p.arxiv_id, p.tldr, p.pdf_url, p.code_url, affiliations_str)
+    return get_block_html(p.title, authors, rate, p.arxiv_id, tldr_text, p.pdf_url, p.code_url, affiliations_str)
 
-def render_email(papers:list[BasePaper]):
+def generate_report(papers:list[BasePaper], db):
     if len(papers) == 0 :
         return framework.replace('__CONTENT__', get_empty_html())
     
-    parts = []
-    # User requested 16 threads for concurrent rendering
+    # Store results in a list initialized with None to maintain order
+    results = [None] * len(papers)
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        # Map _render_single_paper_block to each paper, with tqdm for progress
-        # as_completed yields results as they finish, maintaining responsiveness
-        futures = {executor.submit(_render_single_paper_block, p): p for p in papers}
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(papers), desc='Rendering Email (concurrently)'):
+        # Submit all tasks and keep track of their index in the original list
+        future_to_index = {executor.submit(_render_single_paper_block, p, db): i for i, p in enumerate(papers)}
+        
+        for future in tqdm(concurrent.futures.as_completed(future_to_index), total=len(papers), desc='Generating Report (concurrently)'):
+            index = future_to_index[future]
             try:
-                parts.append(future.result())
+                results[index] = future.result()
             except Exception as exc:
                 logger.error(f'Paper block generation generated an exception: {exc}')
-                # Optionally append a placeholder or log the error to the email content
-                parts.append(get_block_html("Error rendering paper", "N/A", "", "N/A", f"Error: {exc}", "#", "#", ""))
+                results[index] = get_block_html("Error rendering paper", "N/A", "", "N/A", f"Error: {exc}", "#", "#", "")
 
-    content = '<br>' + '</br><br>'.join(parts) + '</br>'
+    content = '<br>' + '</br><br>'.join(results) + '</br>'
     return framework.replace('__CONTENT__', content)
 
 def send_email(sender:str, receiver:str, password:str,smtp_server:str,smtp_port:int, html:str,):

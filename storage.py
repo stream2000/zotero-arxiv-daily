@@ -12,6 +12,7 @@ class Storage:
         self.db_path = os.path.join(data_dir, "metadata.db")
         self.zotero_index_path = os.path.join(data_dir, "zotero.index")
         self.candidate_index_path = os.path.join(data_dir, "candidates.index")
+        logger.debug(f"Storage initialized. DB: {self.db_path}, Zotero Index: {self.zotero_index_path}, Candidate Index: {self.candidate_index_path}")
         
         self._init_db()
         self.zotero_index = self._load_or_create_index(self.zotero_index_path)
@@ -27,6 +28,7 @@ class Storage:
                         date_added TEXT,
                         raw_data BLOB
                     )''')
+        # candidate table includes faiss_id to link to Faiss index
         c.execute('''CREATE TABLE IF NOT EXISTS candidates (
                         id TEXT PRIMARY KEY,
                         source TEXT,
@@ -34,9 +36,25 @@ class Storage:
                         abstract TEXT,
                         category TEXT,
                         score REAL,
-                        faiss_id INTEGER,
-                        raw_data BLOB
+                        raw_data BLOB,
+                        tldr TEXT,
+                        date TEXT
                     )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS biorxiv_history (
+                        date TEXT PRIMARY KEY
+                    )''')
+        
+        # Migration: Ensure tldr and date columns exist for existing databases
+        try:
+            c.execute("ALTER TABLE candidates ADD COLUMN tldr TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+            
+        try:
+            c.execute("ALTER TABLE candidates ADD COLUMN date TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+
         conn.commit()
         conn.close()
 
@@ -85,42 +103,98 @@ class Storage:
         conn.close()
         return ids
 
-    def add_candidates(self, papers, embeddings):
+    def _get_paper_date(self, paper) -> str:
+        """Extract date from paper object as YYYY-MM-DD string."""
+        if paper.source == 'biorxiv':
+            return paper._paper.get('date', '')
+        elif paper.source == 'arxiv':
+            # arxiv.Result.published is a datetime object
+            if hasattr(paper._paper, 'published') and paper._paper.published:
+                return paper._paper.published.strftime("%Y-%m-%d")
+            # Fallback or updated
+            if hasattr(paper._paper, 'updated') and paper._paper.updated:
+                return paper._paper.updated.strftime("%Y-%m-%d")
+        return ''
+
+    def add_candidates(self, papers, embeddings, rebuild_index=True):
         if not papers:
             return
             
-        # Ensure index exists
-        if self.candidate_index is None:
-            dim = embeddings.shape[1]
-            self.candidate_index = self._create_index(dim)
-            
-        start_id = self.candidate_index.ntotal
-        
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        data_to_insert = []
-        for i, p in enumerate(papers):
-            pid = p.arxiv_id 
-            raw = pickle.dumps(p) 
-            cat = p._paper.get('category') if hasattr(p, '_paper') and isinstance(p._paper, dict) else ''
-            
-            faiss_id = start_id + i
-            data_to_insert.append((pid, 'biorxiv', p.title, p.summary, cat, 0.0, faiss_id, raw))
-            
-        c.executemany("INSERT OR IGNORE INTO candidates VALUES (?,?,?,?,?,?,?,?)", data_to_insert)
-        conn.commit()
-        conn.close()
+        # First, insert new candidates into SQLite.
         
+        # Prepare data for insertion (only new papers). Use INSERT OR IGNORE.
+        data_to_insert_sqlite = []
+        for p in papers:
+            pid = p.arxiv_id
+            # Check if this paper already exists in DB to prevent adding to Faiss if already there
+            c.execute("SELECT id FROM candidates WHERE id = ?", (pid,))
+            if c.fetchone() is None: # Only add if it doesn't exist
+                raw = pickle.dumps(p)
+                cat = p._paper.get('category') if hasattr(p, '_paper') and isinstance(p._paper, dict) else ''
+                date_str = self._get_paper_date(p)
+                data_to_insert_sqlite.append((pid, 'biorxiv' if p.source == 'biorxiv' else 'arxiv', p.title, p.summary, cat, 0.0, raw, date_str))
+        
+        if data_to_insert_sqlite: # Only execute if there's new data
+            c.executemany("INSERT OR IGNORE INTO candidates (id, source, title, abstract, category, score, raw_data, date) VALUES (?,?,?,?,?,?,?,?)", data_to_insert_sqlite)
+            conn.commit()
+            logger.info(f"Inserted {len(data_to_insert_sqlite)} new candidates into SQLite.")
+        else:
+            logger.info("No new candidates to insert into SQLite.")
+        conn.close()
+
+        if rebuild_index:
+            # Rebuild Faiss index from all candidates currently in SQLite
+            self._rebuild_candidate_faiss_index()
+        else:
+            logger.info("Skipping Faiss index rebuild as requested.")
+
+    def _rebuild_candidate_faiss_index(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # Fetch all candidate metadata and their actual raw_data (papers) to re-encode
+        # This is to ensure Faiss index perfectly matches what's in SQLite
+        c.execute("SELECT id, raw_data FROM candidates ORDER BY id ASC") # Consistent order
+        candidate_db_data = c.fetchall()
+        conn.close()
+
+        if not candidate_db_data:
+            self.candidate_index = None # No candidates, so no index
+            if os.path.exists(self.candidate_index_path):
+                os.remove(self.candidate_index_path)
+            logger.info("No candidates in DB, Faiss index cleared.")
+            return
+
+        papers_from_db = [pickle.loads(row[1]) for row in candidate_db_data]
+        
+        # Re-encode all abstracts from DB to get fresh embeddings
+        # This might be slow if many, but ensures consistency.
+        # This also assumes embeddings are always the same for same abstract.
+        from recommender import encode_texts # Import here to avoid circular dependency
+        candidate_texts = [p.summary for p in papers_from_db]
+        embeddings = encode_texts(candidate_texts)
+        
+        dim = embeddings.shape[1]
+        self.candidate_index = self._create_index(dim)
         self.candidate_index.add(embeddings.astype(np.float32))
         faiss.write_index(self.candidate_index, self.candidate_index_path)
-        logger.info(f"Added {len(papers)} candidates to storage.")
+        logger.info(f"Rebuilt candidate Faiss index with {len(papers_from_db)} embeddings.")
 
     def update_scores(self, scores_dict):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         data = [(s, pid) for pid, s in scores_dict.items()]
         c.executemany("UPDATE candidates SET score = ? WHERE id = ?", data)
+        conn.commit()
+        conn.close()
+        logger.info(f"Updated scores for {len(scores_dict)} candidates.")
+
+    def update_tldr(self, paper_id, tldr_text):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("UPDATE candidates SET tldr = ? WHERE id = ?", (tldr_text, paper_id))
         conn.commit()
         conn.close()
         
@@ -138,30 +212,94 @@ class Storage:
         # Return list of IDs corresponding to faiss IDs 0..N
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        # Order by faiss_id ASC to match embedding matrix
-        c.execute("SELECT id FROM candidates ORDER BY faiss_id ASC")
+        # Order by id ASC to match embedding matrix (which is built using ORDER BY id ASC)
+        c.execute("SELECT id FROM candidates ORDER BY id ASC")
         ids = [row[0] for row in c.fetchall()]
         conn.close()
         return ids
 
-    def get_top_candidates(self, limit=20, filter_categories=None):
+    def get_all_candidates(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # Fetch score and tldr as well
+        c.execute("SELECT raw_data, score, tldr FROM candidates")
+        rows = c.fetchall()
+        conn.close()
+        
+        papers = []
+        for row in rows:
+            p = pickle.loads(row[0])
+            p.score = row[1]
+            if row[2]:
+                p.set_tldr(row[2])
+            papers.append(p)
+        return papers
+
+    def get_candidates_by_date_range(self, start_date, end_date):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # Select candidates within the date range
+        # Note: dates are stored as strings YYYY-MM-DD
+        c.execute("SELECT raw_data, score, tldr FROM candidates WHERE date >= ? AND date <= ?", (start_date, end_date))
+        rows = c.fetchall()
+        conn.close()
+        
+        papers = []
+        for row in rows:
+            p = pickle.loads(row[0])
+            p.score = row[1]
+            if row[2]:
+                p.set_tldr(row[2])
+            papers.append(p)
+        return papers
+
+    def get_top_candidates(self, limit=20):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        query = "SELECT raw_data FROM candidates"
+        query_base = "SELECT id, score, raw_data, tldr FROM candidates"
         params = []
         
-        if filter_categories:
-             clauses = [f"category LIKE ?" for _ in filter_categories]
-             where_str = " OR ".join(clauses)
-             # Handle case where category is empty?
-             query += f" WHERE ({where_str})"
-             params.extend([f"%{cat}%" for cat in filter_categories])
-        
+        query = query_base
+
         query += " ORDER BY score DESC LIMIT ?"
         params.append(limit)
         
         c.execute(query, params)
         rows = c.fetchall()
         conn.close()
-        return [pickle.loads(r[0]) for r in rows]
+        
+        # Inject scores and tldr into the unpickled BasePaper objects
+        papers_with_scores = []
+        for row in rows:
+            pid, score, raw_data, tldr = row
+            paper = pickle.loads(raw_data)
+            paper.score = score # Set the score from DB
+            paper.set_tldr(tldr) # Set the tldr from DB
+            papers_with_scores.append(paper)
+            
+        return papers_with_scores
+
+    def get_zotero_ids(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT id FROM zotero")
+        ids = {row[0] for row in c.fetchall()}
+        conn.close()
+        return ids
+
+    def get_biorxiv_completed_dates(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT date FROM biorxiv_history")
+        dates = {row[0] for row in c.fetchall()}
+        conn.close()
+        return dates
+
+    def mark_biorxiv_date_completed(self, date_str):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO biorxiv_history (date) VALUES (?)", (date_str,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Marked BioRxiv date {date_str} as completed.")

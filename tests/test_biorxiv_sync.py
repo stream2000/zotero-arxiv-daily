@@ -83,7 +83,9 @@ def test_sync_biorxiv_papers_new_papers(mock_encode_texts, mock_biorxiv_api, sto
     # Simulate today is 2025-12-02, so we fetch for 2025-12-01 (days=1)
     with patch('main.datetime') as mock_datetime:
         mock_datetime.now.return_value = datetime(2025, 12, 2)
-        mock_datetime.date.today.return_value = datetime(2025, 12, 2).date() # For today_str calculation
+        # For today_str calculation, we need to mock datetime.date.today()
+        mock_datetime.date = MagicMock()
+        mock_datetime.date.today.return_value = datetime(2025, 12, 2).date()
         mock_datetime.timedelta = timedelta # Ensure timedelta still works
 
         sync_biorxiv_papers(db, days=1)
@@ -115,6 +117,7 @@ def test_sync_biorxiv_papers_existing_papers(mock_encode_texts, mock_biorxiv_api
     # Simulate today is 2025-12-02, try to sync for 2025-12-01 (should skip due to completed date)
     with patch('main.datetime') as mock_datetime:
         mock_datetime.now.return_value = datetime(2025, 12, 2)
+        mock_datetime.date = MagicMock()
         mock_datetime.date.today.return_value = datetime(2025, 12, 2).date()
         mock_datetime.timedelta = timedelta
 
@@ -144,6 +147,7 @@ def test_sync_biorxiv_papers_fetch_multiple_days(mock_encode_texts, mock_biorxiv
     # Simulate today is 2025-12-02, fetch for 3 days (11-30, 12-01)
     with patch('main.datetime') as mock_datetime:
         mock_datetime.now.return_value = datetime(2025, 12, 2)
+        mock_datetime.date = MagicMock()
         mock_datetime.date.today.return_value = datetime(2025, 12, 2).date()
         mock_datetime.timedelta = timedelta
 

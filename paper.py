@@ -18,6 +18,7 @@ from abc import ABC, abstractproperty
 
 class BasePaper(ABC):
     _score: Optional[float] = None
+    _tldr_cache: Optional[str] = None
 
     @abstractproperty
     def title(self) -> str:
@@ -39,6 +40,13 @@ class BasePaper(ABC):
     def score(self, value: float):
         self._score = value
 
+    def set_tldr(self, tldr: str):
+        self._tldr_cache = tldr
+
+    @property
+    def has_tldr(self) -> bool:
+        return self._tldr_cache is not None
+
     @abstractproperty
     def arxiv_id(self) -> str:
         pass
@@ -59,11 +67,23 @@ class BasePaper(ABC):
     def affiliations(self) -> Optional[List[str]]:
         pass
 
+    @abstractproperty
+    def source(self) -> str:
+        pass
+    @abstractproperty
+    def source(self) -> str:
+        pass
+
 
 class ArxivPaper(BasePaper):
     def __init__(self, paper: arxiv.Result):
         self._paper = paper
         self._score = None  # Initialize _score for BasePaper property
+        self._tldr_cache = None
+
+    @property
+    def source(self) -> str:
+        return 'arxiv'
 
     @property
     def title(self) -> str:
@@ -213,6 +233,9 @@ class ArxivPaper(BasePaper):
 
     @cached_property
     def tldr(self) -> str:
+        if self._tldr_cache:
+            return self._tldr_cache
+            
         introduction = ""
         conclusion = ""
         if self.tex is not None:
@@ -270,6 +293,8 @@ Conclusion: {conclusion}
                 {"role": "user", "content": prompt},
             ]
         )
+        if "LLM generation skipped" in response:
+            return response
         try:
             cleaned_response = response.replace('```json', '').replace('```', '').strip()
             data = json.loads(cleaned_response)
@@ -331,6 +356,11 @@ class BioRxivPaper(BasePaper):
     def __init__(self, paper_data: dict):
         self._paper = paper_data
         self._score = None
+        self._tldr_cache = None
+
+    @property
+    def source(self) -> str:
+        return 'biorxiv'
 
     @property
     def title(self) -> str:
@@ -362,6 +392,9 @@ class BioRxivPaper(BasePaper):
 
     @property
     def tldr(self) -> str:
+        if self._tldr_cache:
+            return self._tldr_cache
+
         llm = get_llm()
         prompt = """Given the title and abstract of a paper, generate a JSON object with three keys:
 "title_zh": Translate the title to Chinese.
@@ -393,6 +426,8 @@ Abstract: {abstract}
                 {"role": "user", "content": prompt},
             ]
         )
+        if "LLM generation skipped" in response:
+            return response
         try:
             cleaned_response = response.replace('```json', '').replace('```', '').strip()
             data = json.loads(cleaned_response)

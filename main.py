@@ -110,7 +110,7 @@ def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
     return papers
 
 
-def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False):
+def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False, rebuild_index: bool = True):
     """
     Fetches and stores new papers from BioRxiv for the specified number of past days.
     It checks for already completed dates and processes each new day atomically.
@@ -166,7 +166,7 @@ def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False):
                     logger.info(f"Found {len(new_papers_for_day)} new papers for {date_str}. Storing in DB.")
                     new_texts = [p.summary for p in new_papers_for_day]
                     new_embeddings = encode_texts(new_texts)
-                    db.add_candidates(new_papers_for_day, new_embeddings)
+                    db.add_candidates(new_papers_for_day, new_embeddings, rebuild_index=rebuild_index)
                 else:
                     logger.info(f"All papers for {date_str} already exist in DB.")
                 
@@ -240,13 +240,13 @@ if __name__ == '__main__':
         "--llm_provider",
         type=str,
         help="LLM Provider (openai, gemini)",
-        default="openai",
+        default="gemini",
     )
     add_argument(
         "--model_name",
         type=str,
         help="LLM Model Name",
-        default="gpt-4o",
+        default="gemini-2.5-flash",
     )
     add_argument(
         "--language",
@@ -274,6 +274,7 @@ if __name__ == '__main__':
     )
     add_argument('--days', type=int, help='Number of past days to fetch papers from', default=4)
     add_argument('--enable_email', type=bool, help='Enable email sending', default=False)
+    add_argument('--rebuild-index', action='store_true', help='Force rebuild of the candidate Faiss index.')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
 
@@ -316,7 +317,7 @@ if __name__ == '__main__':
     # --- Sync/Fetch new papers ---
     if args.source == 'biorxiv':
         logger.info(f"Syncing BioRxiv papers for the last {args.days} days...")
-        sync_biorxiv_papers(db, args.days, args.debug)
+        sync_biorxiv_papers(db, args.days, args.debug, rebuild_index=args.rebuild_index)
         logger.info("BioRxiv sync complete.")
         
     elif args.source == 'arxiv':
@@ -335,7 +336,7 @@ if __name__ == '__main__':
                 logger.info(f"Encoding {len(new_papers)} new candidates...")
                 new_texts = [p.summary for p in new_papers]
                 new_embeddings = encode_texts(new_texts)
-                db.add_candidates(new_papers, new_embeddings)
+                db.add_candidates(new_papers, new_embeddings, rebuild_index=args.rebuild_index)
             else:
                 logger.info("All fetched papers already exist in DB.")
 
@@ -400,9 +401,14 @@ if __name__ == '__main__':
     if args.use_llm_api:
         logger.info(f"Using {args.llm_provider} API as global LLM.")
         api_key = args.openai_api_key
-        if args.llm_provider == "gemini" and args.gemini_api_key:
-            api_key = args.gemini_api_key
-        set_global_llm(api_key=api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language,
+        model_name = args.model_name
+        if args.llm_provider == "gemini":
+            if args.gemini_api_key:
+                api_key = args.gemini_api_key
+            if model_name == "gpt-4o": # If default openai model is set, switch to default gemini
+                model_name = "models/gemini-1.5-flash"
+        
+        set_global_llm(api_key=api_key, base_url=args.openai_api_base, model=model_name, lang=args.language,
                        provider=args.llm_provider)
     else:
         logger.info("Using Local LLM as global LLM.")
