@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 from abc import ABC, abstractproperty
 from typing import List, Optional
+import numpy as np
 
 # Import the actual classes to be tested
 from paper import BasePaper, ArxivPaper, BioRxivPaper, SimpleAuthor
@@ -162,13 +163,12 @@ class TestPaperAbstraction(unittest.TestCase):
             self.assertEqual(authors[1].name, "Author 2")
             self.assertIsInstance(authors[0], SimpleAuthor)
 
-
     @patch('recommender.SentenceTransformer')
     def test_rerank_paper(self, MockSentenceTransformer):
         # Mock SentenceTransformer and its methods
         mock_encoder = Mock()
         MockSentenceTransformer.return_value = mock_encoder
-        mock_encoder.encode.side_effect = lambda x: [[0.1, 0.1]] * len(x) # Simply return dummy embeddings
+        mock_encoder.encode.side_effect = lambda x, **kwargs: np.array([[0.1, 0.1]] * len(x), dtype=np.float32) # Return NumPy arrays
         mock_encoder.similarity.return_value = [[0.5] * len(self.mock_corpus)] * len(self.mock_papers)
 
         reranked_papers = rerank_paper(self.mock_papers, self.mock_corpus)
@@ -180,8 +180,7 @@ class TestPaperAbstraction(unittest.TestCase):
     @patch('construct_email.get_block_html')
     @patch('construct_email.get_empty_html')
     @patch('construct_email.tqdm') 
-    @patch('construct_email.time.sleep')
-    def test_render_email(self, mock_sleep, mock_tqdm, mock_get_empty_html, mock_get_block_html):
+    def test_render_email(self, mock_tqdm, mock_get_empty_html, mock_get_block_html): # Removed mock_sleep
         # Configure mock_tqdm to return the iterable passed to it
         mock_tqdm.side_effect = lambda x, **kwargs: x
 
