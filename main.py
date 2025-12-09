@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from tempfile import mkstemp
+from typing import Optional
 
 import arxiv
 import feedparser
@@ -82,7 +83,7 @@ def filter_corpus(corpus: list[dict], pattern: str) -> list[dict]:
     return new_corpus
 
 
-def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
+def get_arxiv_paper(query: str, db: Storage, debug: bool = False) -> list[ArxivPaper]:
     """Retrieve new papers from ArXiv."""
     client = arxiv.Client(num_retries=10, delay_seconds=10)
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
@@ -95,7 +96,7 @@ def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
         bar = tqdm(total=len(all_paper_ids), desc="Retrieving Arxiv papers")
         for i in range(0, len(all_paper_ids), 20):
             search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            batch = [ArxivPaper(p) for p in client.results(search)]
+            batch = [ArxivPaper(p, storage=db) for p in client.results(search)]
             bar.update(len(batch))
             papers.extend(batch)
         bar.close()
@@ -104,19 +105,20 @@ def get_arxiv_paper(query: str, debug: bool = False) -> list[ArxivPaper]:
         search = arxiv.Search(query='cat:cs.AI', sort_by=arxiv.SortCriterion.SubmittedDate)
         papers = []
         for i in client.results(search):
-            papers.append(ArxivPaper(i))
+            papers.append(ArxivPaper(i, storage=db))
             if len(papers) == 5:
                 break
     return papers
 
 
-def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False, rebuild_index: bool = True):
+def sync_biorxiv_papers(db: Storage, days: int = 1, end_date_override: Optional[datetime] = None, debug: bool = False, rebuild_index: bool = True):
     """
     Fetches and stores new papers from BioRxiv for the specified number of past days.
     It checks for already completed dates and processes each new day atomically.
+    If end_date_override is provided, it will be used instead of datetime.now().
     """
     api = BioRxivApi()
-    end_date = datetime.now()
+    end_date = end_date_override if end_date_override else datetime.now()
     today_str = end_date.strftime("%Y-%m-%d")
     start_date = end_date - timedelta(days=days)
 
@@ -157,7 +159,7 @@ def sync_biorxiv_papers(db: Storage, days: int = 1, debug: bool = False, rebuild
                     db.mark_biorxiv_date_completed(date_str)
                     continue
                 
-                paper_objects = [BioRxivPaper(p) for p in raw_papers_for_day]
+                paper_objects = [BioRxivPaper(p, storage=db) for p in raw_papers_for_day]
                 unique_papers = {p.arxiv_id: p for p in paper_objects}
                 existing_ids = db.get_existing_candidate_ids()
                 new_papers_for_day = [p for p in unique_papers.values() if p.arxiv_id not in existing_ids]
@@ -273,6 +275,7 @@ if __name__ == '__main__':
         default=None,
     )
     add_argument('--days', type=int, help='Number of past days to fetch papers from', default=4)
+    add_argument('--endday', type=str, help='End date for fetching papers (YYYY-MM-DD). Defaults to today.', default=None)
     add_argument('--enable_email', type=bool, help='Enable email sending', default=False)
     add_argument('--rebuild-index', action='store_true', help='Force rebuild of the candidate Faiss index.')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
@@ -291,6 +294,16 @@ if __name__ == '__main__':
     else:
         logger.remove()
         logger.add(sys.stdout, level="INFO")
+
+    # Determine the effective end_date for fetching and scoring
+    if args.endday:
+        try:
+            effective_end_date = datetime.strptime(args.endday, "%Y-%m-%d")
+        except ValueError:
+            logger.error(f"Invalid --endday format: {args.endday}. Expected YYYY-MM-DD.")
+            sys.exit(1)
+    else:
+        effective_end_date = datetime.now()
 
     # Initialize Storage
     db = Storage()
@@ -316,13 +329,13 @@ if __name__ == '__main__':
 
     # --- Sync/Fetch new papers ---
     if args.source == 'biorxiv':
-        logger.info(f"Syncing BioRxiv papers for the last {args.days} days...")
-        sync_biorxiv_papers(db, args.days, args.debug, rebuild_index=args.rebuild_index)
+        logger.info(f"Syncing BioRxiv papers for the last {args.days} days, ending on {effective_end_date.strftime('%Y-%m-%d')}")
+        sync_biorxiv_papers(db, args.days, effective_end_date, args.debug, rebuild_index=args.rebuild_index)
         logger.info("BioRxiv sync complete.")
         
     elif args.source == 'arxiv':
         logger.info("Retrieving Arxiv papers...")
-        fetched_papers = get_arxiv_paper(args.arxiv_query, args.debug)
+        fetched_papers = get_arxiv_paper(args.arxiv_query, db, args.debug)
 
         if len(fetched_papers) == 0:
             logger.info(f"No new papers fetched from {args.source}.")
@@ -344,13 +357,18 @@ if __name__ == '__main__':
     logger.info("Scoring all candidates against current Zotero library...")
     
     # Determine date range for candidates to be scored
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=args.days)
+    # Use the effective_end_date and args.days for consistency
+    end_date_for_scoring = effective_end_date
+    start_date_for_scoring = end_date_for_scoring - timedelta(days=args.days)
     
     # 1. Get relevant candidate papers from the DB within the date range
-    # These papers already have their tldr and score potentially loaded
-    candidates_from_db = db.get_candidates_by_date_range(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-    logger.info(f"Retrieved {len(candidates_from_db)} candidates from DB for the last {args.days} days.")
+    candidates_from_db = db.get_candidates_by_date_range(start_date_for_scoring.strftime("%Y-%m-%d"), end_date_for_scoring.strftime("%Y-%m-%d"))
+    logger.info(f"Retrieved {len(candidates_from_db)} candidates from DB for the last {args.days} days, ending on {end_date_for_scoring.strftime('%Y-%m-%d')}")
+
+    # CRITICAL FIX: Inject the storage instance into each paper loaded from DB
+    for p in candidates_from_db:
+        p.storage = db
+
 
     # 2. In-memory category filtering for BioRxiv
     if args.source == 'biorxiv' and args.biorxiv_category:

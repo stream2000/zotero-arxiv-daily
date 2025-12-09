@@ -28,7 +28,6 @@ class Storage:
                         date_added TEXT,
                         raw_data BLOB
                     )''')
-        # candidate table includes faiss_id to link to Faiss index
         c.execute('''CREATE TABLE IF NOT EXISTS candidates (
                         id TEXT PRIMARY KEY,
                         source TEXT,
@@ -36,24 +35,30 @@ class Storage:
                         abstract TEXT,
                         category TEXT,
                         score REAL,
-                        raw_data BLOB,
-                        tldr TEXT,
-                        date TEXT
+                        raw_data BLOB
                     )''')
         c.execute('''CREATE TABLE IF NOT EXISTS biorxiv_history (
                         date TEXT PRIMARY KEY
                     )''')
         
-        # Migration: Ensure tldr and date columns exist for existing databases
-        try:
-            c.execute("ALTER TABLE candidates ADD COLUMN tldr TEXT")
-        except sqlite3.OperationalError:
-            pass # Column likely already exists
-            
-        try:
-            c.execute("ALTER TABLE candidates ADD COLUMN date TEXT")
-        except sqlite3.OperationalError:
-            pass # Column likely already exists
+        # Robust migration using PRAGMA
+        c.execute("PRAGMA table_info(candidates)")
+        columns = [row[1] for row in c.fetchall()]
+        
+        migrations = {
+            "tldr": "TEXT",
+            "date": "TEXT",
+            "citation_count": "INTEGER",
+            "citation_last_updated": "TEXT"
+        }
+        
+        for col, col_type in migrations.items():
+            if col not in columns:
+                try:
+                    c.execute(f"ALTER TABLE candidates ADD COLUMN {col} {col_type}")
+                    logger.info(f"Successfully migrated database: Added column '{col}'.")
+                except sqlite3.OperationalError as e:
+                    logger.error(f"Failed to add column '{col}': {e}")
 
         conn.commit()
         conn.close()
@@ -197,6 +202,16 @@ class Storage:
         c.execute("UPDATE candidates SET tldr = ? WHERE id = ?", (tldr_text, paper_id))
         conn.commit()
         conn.close()
+
+    def update_citation_count(self, paper_id, count):
+        from datetime import datetime
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        c.execute("UPDATE candidates SET citation_count = ?, citation_last_updated = ? WHERE id = ?", (count, now_str, paper_id))
+        conn.commit()
+        conn.close()
+        logger.debug(f"Updated citation count for {paper_id} to {count}.")
         
     def get_zotero_embeddings(self):
         if self.zotero_index and self.zotero_index.ntotal > 0:
@@ -221,8 +236,8 @@ class Storage:
     def get_all_candidates(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        # Fetch score and tldr as well
-        c.execute("SELECT raw_data, score, tldr FROM candidates")
+        # Fetch score, tldr, and citation info
+        c.execute("SELECT raw_data, score, tldr, citation_count, citation_last_updated FROM candidates")
         rows = c.fetchall()
         conn.close()
         
@@ -232,6 +247,9 @@ class Storage:
             p.score = row[1]
             if row[2]:
                 p.set_tldr(row[2])
+            # Set citation info from DB
+            p._citation_count_cache = row[3]
+            p._citation_last_updated = row[4]
             papers.append(p)
         return papers
 
@@ -239,8 +257,7 @@ class Storage:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         # Select candidates within the date range
-        # Note: dates are stored as strings YYYY-MM-DD
-        c.execute("SELECT raw_data, score, tldr FROM candidates WHERE date >= ? AND date <= ?", (start_date, end_date))
+        c.execute("SELECT raw_data, score, tldr, citation_count, citation_last_updated FROM candidates WHERE date >= ? AND date <= ?", (start_date, end_date))
         rows = c.fetchall()
         conn.close()
         
@@ -250,6 +267,9 @@ class Storage:
             p.score = row[1]
             if row[2]:
                 p.set_tldr(row[2])
+            # Set citation info from DB
+            p._citation_count_cache = row[3]
+            p._citation_last_updated = row[4]
             papers.append(p)
         return papers
 

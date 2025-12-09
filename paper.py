@@ -6,6 +6,7 @@ import tarfile
 import re
 import time
 import json
+from datetime import datetime, timedelta
 from llm import get_llm
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -15,15 +16,19 @@ from contextlib import ExitStack
 from urllib.error import HTTPError
 from abc import ABC, abstractproperty
 
+from citation_client import get_citation_count
+
 
 class BasePaper(ABC):
     _score: Optional[float] = None
     _tldr_cache: Optional[str] = None
+    _citation_count_cache: Optional[int] = None
+    _citation_last_updated: Optional[str] = None
+    storage: Optional['Storage'] = None
 
     @abstractproperty
     def title(self) -> str:
         pass
-
     @abstractproperty
     def summary(self) -> str:
         pass
@@ -59,6 +64,56 @@ class BasePaper(ABC):
     def code_url(self) -> Optional[str]:
         pass
 
+    @property
+    def citation_count(self) -> Optional[int]:
+        # Rule 1: Don't fetch for papers published within the last 60 days.
+        try:
+            published = datetime.strptime(self.published_date, '%Y-%m-%d')
+            if datetime.now() - published < timedelta(days=60):
+                return None
+        except (ValueError, TypeError):
+            pass # Fallback for parsing errors
+
+        # Rule 2: If citation count is fresh (less than 7 days old), return cached value.
+        if self._citation_last_updated:
+            try:
+                last_updated = datetime.strptime(self._citation_last_updated, '%Y-%m-%d %H:%M:%S')
+                if datetime.now() - last_updated < timedelta(days=7):
+                    return self._citation_count_cache
+            except (ValueError, TypeError):
+                pass # Fallback for parsing errors
+
+        # If rules don't apply, fetch new data.
+        new_count = get_citation_count(self.title, self.authors)
+        if new_count is not None and self.storage:
+            self.storage.update_citation_count(self.arxiv_id, new_count)
+            self._citation_count_cache = new_count
+            self._citation_last_updated = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        return self._citation_count_cache
+    @property
+    def title_zh(self) -> str:
+        """Parses the TLDR JSON to get the Chinese title."""
+        if not self.has_tldr:
+            return ""
+        try:
+            data = json.loads(self.tldr)
+            return data.get('title_zh', '')
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+    @property
+    def tldr_zh(self) -> str:
+        """Parses the TLDR JSON to get the Chinese summary."""
+        if not self.has_tldr:
+            return ""
+        try:
+            data = json.loads(self.tldr)
+            return data.get('tldr_zh', '')
+        except (json.JSONDecodeError, TypeError):
+            # Backwards compatibility: if it's not JSON, it's the old HTML string.
+            return self.tldr
+
     @abstractproperty
     def tldr(self) -> str:
         pass
@@ -70,16 +125,24 @@ class BasePaper(ABC):
     @abstractproperty
     def source(self) -> str:
         pass
+
     @abstractproperty
-    def source(self) -> str:
+    def published_date(self) -> str:
+        pass
+
+    @abstractproperty
+    def categories(self) -> List[str]:
         pass
 
 
 class ArxivPaper(BasePaper):
-    def __init__(self, paper: arxiv.Result):
+    def __init__(self, paper: arxiv.Result, storage: Optional['Storage'] = None):
         self._paper = paper
-        self._score = None  # Initialize _score for BasePaper property
+        self._score = None
         self._tldr_cache = None
+        self._citation_count_cache = None
+        self._citation_last_updated = None
+        self.storage = storage
 
     @property
     def source(self) -> str:
@@ -96,6 +159,15 @@ class ArxivPaper(BasePaper):
     @property
     def authors(self) -> List[Any]:  # objects returned by arxiv.Result.authors have .name
         return self._paper.authors
+
+    @property
+    def published_date(self) -> str:
+        return self._paper.published.strftime('%Y-%m-%d')
+
+    @property
+    def categories(self) -> List[str]:
+        return self._paper.categories
+
 
     @cached_property
     def arxiv_id(self) -> str:
@@ -231,7 +303,7 @@ class ArxivPaper(BasePaper):
                 file_contents["all"] = None
         return file_contents
 
-    @cached_property
+    @property
     def tldr(self) -> str:
         if self._tldr_cache:
             return self._tldr_cache
@@ -259,36 +331,11 @@ class ArxivPaper(BasePaper):
             if match:
                 conclusion = match.group(0)
         llm = get_llm()
-        prompt = """Given the title, abstract, introduction and the conclusion (if any) of a paper, generate a JSON object with three keys:
-"title_zh": Translate the title to Chinese.
-"tldr_en": A one-sentence TLDR summary in English.
-"tldr_zh": A one-sentence TLDR summary in Chinese.
-
-Strictly return ONLY the JSON object, no markdown formatting.
-
-Title: {title}
-Abstract: {abstract}
-Introduction: {introduction}
-Conclusion: {conclusion}
-"""
-        prompt = prompt.format(
-            title=self.title,
-            abstract=self.summary,
-            introduction=introduction,
-            conclusion=conclusion
-        )
-
-        # use gpt-4o tokenizer for estimation
-        enc = tiktoken.encoding_for_model("gpt-4o")
-        prompt_tokens = enc.encode(prompt)
-        prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
-        prompt = enc.decode(prompt_tokens)
-
         response = llm.generate(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an assistant who perfectly summarizes scientific paper, and gives the core idea of the paper to the user.",
+                    "content": "You are an assistant who perfectly summarizes scientific paper, providing the core idea to the user. Ensure the Chinese TLDR is more detailed and elaborates on the key findings.",
                 },
                 {"role": "user", "content": prompt},
             ]
@@ -297,11 +344,12 @@ Conclusion: {conclusion}
             return response
         try:
             cleaned_response = response.replace('```json', '').replace('```', '').strip()
-            data = json.loads(cleaned_response)
-            final_tldr = f"<b>{data.get('title_zh', '')}</b><br><br><b>TLDR (EN):</b> {data.get('tldr_en', '')}<br><br><b>TLDR (ZH):</b> {data.get('tldr_zh', '')}"
-            return final_tldr
+            json.loads(cleaned_response)  # Validate
+            self._tldr_cache = cleaned_response
+            return cleaned_response
         except Exception as e:
             logger.error(f"Failed to parse LLM JSON response: {e}. Response: {response}")
+            self._tldr_cache = response
             return response
 
     @cached_property
@@ -353,10 +401,13 @@ class SimpleAuthor:
 
 
 class BioRxivPaper(BasePaper):
-    def __init__(self, paper_data: dict):
+    def __init__(self, paper_data: dict, storage: Optional['Storage'] = None):
         self._paper = paper_data
         self._score = None
         self._tldr_cache = None
+        self._citation_count_cache = None
+        self._citation_last_updated = None
+        self.storage = storage
 
     @property
     def source(self) -> str:
@@ -421,7 +472,7 @@ Abstract: {abstract}
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an assistant who perfectly summarizes scientific paper, and gives the core idea of the paper to the user.",
+                    "content": "You are an assistant who perfectly summarizes scientific paper, providing the core idea to the user. Ensure the Chinese TLDR is more detailed and elaborates on the key findings.",
                 },
                 {"role": "user", "content": prompt},
             ]
@@ -430,13 +481,22 @@ Abstract: {abstract}
             return response
         try:
             cleaned_response = response.replace('```json', '').replace('```', '').strip()
-            data = json.loads(cleaned_response)
-            final_tldr = f"<b>{data.get('title_zh', '')}</b><br><br><b>TLDR (EN):</b> {data.get('tldr_en', '')}<br><br><b>TLDR (ZH):</b> {data.get('tldr_zh', '')}"
-            return final_tldr
+            json.loads(cleaned_response)  # Validate
+            self._tldr_cache = cleaned_response
+            return cleaned_response
         except Exception as e:
             logger.error(f"Failed to parse LLM JSON response: {e}. Response: {response}")
+            self._tldr_cache = response
             return response
 
     @property
     def affiliations(self) -> Optional[List[str]]:
         return None
+
+    @property
+    def published_date(self) -> str:
+        return self._paper.get('date', 'N/A')
+
+    @property
+    def categories(self) -> List[str]:
+        return [c.strip() for c in self._paper.get('category', '').split(';')]

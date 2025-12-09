@@ -61,14 +61,33 @@ def get_empty_html():
   """
   return block_template
 
-def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, pdf_url:str, code_url:str=None, affiliations:str=None):
+def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, tldr_abstract:str, pdf_url:str, code_url:str=None, affiliations:str=None, citation_count:int=None, published_date:str=None, categories:list=None, summary:str=None, title_zh:str=None):
     code = f'<a href="{code_url}" style="display: inline-block; text-decoration: none; font-size: 14px; font-weight: bold; color: #fff; background-color: #5bc0de; padding: 8px 16px; border-radius: 4px; margin-left: 8px;">Code</a>' if code_url else ''
+    citation = f'<strong>Citations:</strong> {citation_count}' if citation_count is not None else ''
+    published = f'<strong>Published:</strong> {published_date}' if published_date else ''
+    categories_str = f'<strong>Categories:</strong> {", ".join(categories)}' if categories else ''
+    abstract_details = f"""
+    <details>
+        <summary style="cursor: pointer; font-weight: bold;">Show Abstract</summary>
+        <p style="text-align: justify;">{summary}</p>
+    </details>
+    """ if summary else ''
+    
+    title_block = f"""
+    <td style="font-size: 20px; font-weight: bold; color: #333;">
+        {title}<br>
+        <span style="font-size: 16px; font-weight: normal;">{title_zh}</span>
+    </td>
+    """ if title_zh else f"""
+    <td style="font-size: 20px; font-weight: bold; color: #333;">
+        {title}
+    </td>
+    """
+
     block_template = """
     <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background-color: #f9f9f9;">
     <tr>
-        <td style="font-size: 20px; font-weight: bold; color: #333;">
-            {title}
-        </td>
+        {title_block}
     </tr>
     <tr>
         <td style="font-size: 14px; color: #666; padding: 8px 0;">
@@ -79,7 +98,14 @@ def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, 
     </tr>
     <tr>
         <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>Relevance:</strong> {rate}
+            <strong>Relevance:</strong> {rate} &nbsp;&nbsp; {citation}
+        </td>
+    </tr>
+    <tr>
+        <td style="font-size: 14px; color: #333; padding: 8px 0;">
+            {published}
+            <br>
+            {categories_str}
         </td>
     </tr>
     <tr>
@@ -89,10 +115,14 @@ def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, 
     </tr>
     <tr>
         <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>TLDR:</strong> {abstract}
+            <strong>TLDR:</strong> {tldr_abstract}
         </td>
     </tr>
-
+    <tr>
+        <td style="font-size: 14px; color: #333; padding: 8px 0;">
+            {abstract_details}
+        </td>
+    </tr>
     <tr>
         <td style="padding: 8px 0;">
             <a href="{pdf_url}" style="display: inline-block; text-decoration: none; font-size: 14px; font-weight: bold; color: #fff; background-color: #d9534f; padding: 8px 16px; border-radius: 4px;">PDF</a>
@@ -101,7 +131,21 @@ def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, 
     </tr>
 </table>
 """
-    return block_template.format(title=title, authors=authors,rate=rate,arxiv_id=arxiv_id, abstract=abstract, pdf_url=pdf_url, code=code, affiliations=affiliations)
+    return block_template.format(
+        title_block=title_block,
+        title=title,
+        authors=authors,
+        rate=rate,
+        arxiv_id=arxiv_id,
+        tldr_abstract=tldr_abstract,
+        pdf_url=pdf_url,
+        code=code,
+        affiliations=affiliations,
+        citation=citation,
+        published=published,
+        categories_str=categories_str,
+        abstract_details=abstract_details
+    )
 
 def get_stars(score:float):
     if score is None:
@@ -123,18 +167,14 @@ def get_stars(score:float):
 
 def _render_single_paper_block(p: BasePaper, db):
     """Helper function to render a single paper block, including TLDR generation."""
-    # Check if TLDR needs to be generated and saved
-    should_save = not p.has_tldr
+    # This will trigger the LLM call and cache the JSON string if not already done.
+    tldr_json_str = p.tldr 
     
-    # Accessing p.tldr will generate it if not cached
-    tldr_text = p.tldr 
-    
-    if should_save:
-        # Save to DB
-        # Note: In high concurrency, this might lock the DB file temporarily, 
-        # but sqlite3 handles this with timeouts usually.
+    # Save to DB if it was newly generated
+    if not p.has_tldr:
         try:
-            db.update_tldr(p.arxiv_id, tldr_text)
+            # We save the raw JSON string that p.tldr returns
+            db.update_tldr(p.arxiv_id, tldr_json_str)
         except Exception as e:
             logger.error(f"Failed to save TLDR for {p.arxiv_id}: {e}")
 
@@ -154,7 +194,21 @@ def _render_single_paper_block(p: BasePaper, db):
         if len(p.affiliations) > 5:
             affiliations_str += ', ...'
             
-    return get_block_html(p.title, authors, rate, p.arxiv_id, tldr_text, p.pdf_url, p.code_url, affiliations_str)
+    return get_block_html(
+        title=p.title,
+        authors=authors,
+        rate=rate,
+        arxiv_id=p.arxiv_id,
+        tldr_abstract=p.tldr_zh,
+        pdf_url=p.pdf_url,
+        code_url=p.code_url,
+        affiliations=affiliations_str,
+        citation_count=p.citation_count,
+        published_date=p.published_date,
+        categories=p.categories,
+        summary=p.summary,
+        title_zh=p.title_zh
+    )
 
 def generate_report(papers:list[BasePaper], db):
     if len(papers) == 0 :
@@ -163,7 +217,7 @@ def generate_report(papers:list[BasePaper], db):
     # Store results in a list initialized with None to maintain order
     results = [None] * len(papers)
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         # Submit all tasks and keep track of their index in the original list
         future_to_index = {executor.submit(_render_single_paper_block, p, db): i for i, p in enumerate(papers)}
         
