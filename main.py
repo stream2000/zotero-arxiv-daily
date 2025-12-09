@@ -16,7 +16,7 @@ from tqdm import tqdm
 import re
 
 from biorxiv_client import BioRxivApi
-from report import generate_report, send_email
+from report import generate_report
 from llm import set_global_llm
 from paper import ArxivPaper, BioRxivPaper
 from recommender import encode_texts, calculate_scores
@@ -183,22 +183,42 @@ parser = argparse.ArgumentParser(description='Recommender system for academic pa
 
 
 def add_argument(*args, **kwargs):
-    def get_env(key: str, default=None):
-        v = os.environ.get(key)
-        if v == '' or v is None:
-            return default
-        return v
-
-    parser.add_argument(*args, **kwargs)
-    arg_full_name = kwargs.get('dest', args[-1][2:])
-    env_name = arg_full_name.upper()
-    env_value = get_env(env_name)
-    if env_value is not None:
-        if kwargs.get('type') == bool:
-            env_value = env_value.lower() in ['true', '1']
+    # The 'dest' argument to parser.add_argument is used to name the attribute
+    # on the args object. If 'dest' is not provided, it's inferred from the
+    # argument name (e.g., '--my-arg' becomes 'my_arg').
+    dest = kwargs.get('dest')
+    if not dest:
+        # Find the long argument name (e.g., '--some-option')
+        long_arg = next((arg for arg in args if arg.startswith('--')), None)
+        if long_arg:
+            # Convert '--some-option' to 'some_option'
+            dest = long_arg[2:].replace('-', '_')
         else:
-            env_value = kwargs.get('type')(env_value)
-        parser.set_defaults(**{arg_full_name: env_value})
+            # Fallback for positional arguments, though not used in this script for env vars
+            dest = args[0].replace('-', '_')
+
+    # Environment variable name is the uppercase of the destination key
+    env_name = dest.upper()
+    
+    # Get default value from kwargs if it exists
+    default_value = kwargs.get('default')
+
+    # Try to get value from environment variable
+    env_value = os.environ.get(env_name)
+
+    # Determine the final default value: env var > kwarg default
+    if env_value is not None:
+        # Type cast the environment variable string to the appropriate type
+        arg_type = kwargs.get('type', str)
+        if arg_type == bool:
+            final_value = env_value.lower() in ['true', '1', 'yes']
+        else:
+            final_value = arg_type(env_value)
+        # Set the default in kwargs, so argparse uses it if no CLI arg is provided
+        kwargs['default'] = final_value
+    
+    # Let argparse handle the rest, including overriding defaults with CLI args
+    parser.add_argument(*args, **kwargs)
 
 
 if __name__ == '__main__':
@@ -206,19 +226,15 @@ if __name__ == '__main__':
     add_argument('--zotero_id', type=str, help='Zotero user ID')
     add_argument('--zotero_key', type=str, help='Zotero API key')
     add_argument('--zotero_ignore', type=str, help='Zotero collection to ignore, using gitignore-style pattern.')
-    add_argument('--send_empty', type=bool, help='If get no arxiv paper, send empty email', default=False)
+
     add_argument('--max_paper_num', type=int, help='Maximum number of papers to recommend', default=100)
     add_argument('--arxiv_query', type=str, help='Arxiv search query')
-    add_argument('--smtp_server', type=str, help='SMTP server')
-    add_argument('--smtp_port', type=int, help='SMTP port')
-    add_argument('--sender', type=str, help='Sender email address')
-    add_argument('--receiver', type=str, help='Receiver email address')
-    add_argument('--sender_password', type=str, help='Sender email password')
+
     add_argument(
         "--use_llm_api",
         type=bool,
         help="Use OpenAI API to generate TLDR",
-        default=False,
+        default=True,
     )
     add_argument(
         "--openai_api_key",
@@ -256,12 +272,7 @@ if __name__ == '__main__':
         help="Language of TLDR",
         default="English",
     )
-    add_argument(
-        "--output_file",
-        type=str,
-        help="Local output file path",
-        default="report.html",
-    )
+
     add_argument(
         "--source",
         type=str,
@@ -276,7 +287,8 @@ if __name__ == '__main__':
     )
     add_argument('--days', type=int, help='Number of past days to fetch papers from', default=4)
     add_argument('--endday', type=str, help='End date for fetching papers (YYYY-MM-DD). Defaults to today.', default=None)
-    add_argument('--enable_email', type=bool, help='Enable email sending', default=False)
+
+    add_argument('--archive_days', type=int, help='Archive reports older than this many days. Set to 0 to disable.', default=7)
     add_argument('--rebuild-index', action='store_true', help='Force rebuild of the candidate Faiss index.')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
@@ -412,8 +424,7 @@ if __name__ == '__main__':
     
     if not papers_for_report:
          logger.info("No relevant papers found to report.")
-         if not args.send_empty:
-            exit(0)
+         exit(0)
     
     # Setup LLM for TLDR generation (called during render_email -> p.tldr)
     if args.use_llm_api:
@@ -432,19 +443,37 @@ if __name__ == '__main__':
         logger.info("Using Local LLM as global LLM.")
         set_global_llm(lang=args.language)
 
+    # --- Report Generation and Archiving ---
     html = generate_report(papers_for_report, db)
 
-    if args.output_file:
-        with open(args.output_file, 'w', encoding='utf-8') as f:
-            f.write(html)
-        logger.success(f"Report saved to {args.output_file}")
+    report_dir = 'report'
+    archive_dir = os.path.join(report_dir, 'archive')
 
-    if args.enable_email and args.sender and args.receiver and args.smtp_server and args.smtp_port and args.sender_password:
-        logger.info("Sending email...")
-        send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
-        logger.success(
-            "Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
-    elif not args.enable_email:
-        logger.info("Email sending is disabled (enable with --enable_email).")
-    else:
-        logger.info("Email configuration is incomplete. Skipping email sending.")
+    # Create directories if they don't exist
+    os.makedirs(report_dir, exist_ok=True)
+    os.makedirs(archive_dir, exist_ok=True)
+
+    # Generate dynamic report name
+    source_name = args.source
+    
+    # Use the actual dates used for scoring as the date range in the filename
+    start_date_filename = start_date_for_scoring.strftime("%Y-%m-%d")
+    end_date_filename = end_date_for_scoring.strftime("%Y-%m-%d")
+    
+    filename = f"{source_name}_{start_date_filename}_to_{end_date_filename}.html"
+    output_path = os.path.join(report_dir, filename)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    logger.success(f"Report saved to {output_path}")
+
+    # Archive old reports
+    if args.archive_days > 0:
+        for f in os.listdir(report_dir):
+            if f.endswith('.html'):
+                file_path = os.path.join(report_dir, f)
+                if os.path.isfile(file_path):
+                    modification_time = os.path.getmtime(file_path)
+                    if (datetime.now() - datetime.fromtimestamp(modification_time)).days > args.archive_days:
+                        os.rename(file_path, os.path.join(archive_dir, f))
+                        logger.info(f"Archived old report: {f}")

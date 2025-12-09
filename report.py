@@ -1,12 +1,6 @@
 from paper import BasePaper
 import math
 from tqdm import tqdm
-from email.header import Header
-from email.mime.text import MIMEText
-from email.utils import parseaddr, formataddr
-import smtplib
-import datetime
-import time
 from loguru import logger
 import concurrent.futures # Added for concurrency
 
@@ -232,25 +226,4 @@ def generate_report(papers:list[BasePaper], db):
     content = '<br>' + '</br><br>'.join(results) + '</br>'
     return framework.replace('__CONTENT__', content)
 
-def send_email(sender:str, receiver:str, password:str,smtp_server:str,smtp_port:int, html:str,):
-    def _format_addr(s):
-        name, addr = parseaddr(s)
-        return formataddr((Header(name, 'utf-8').encode(), addr))
 
-    msg = MIMEText(html, 'html', 'utf-8')
-    msg['From'] = _format_addr('Github Action <%s>' % sender)
-    msg['To'] = _format_addr('You <%s>' % receiver)
-    today = datetime.datetime.now().strftime('%Y/%m/%d')
-    msg['Subject'] = Header(f'Daily arXiv {today}', 'utf-8').encode()
-
-    try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-    except Exception as e:
-        logger.warning(f"Failed to use TLS. {e}")
-        logger.warning(f"Try to use SSL.")
-        server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-
-    server.login(sender, password)
-    server.sendmail(sender, [receiver], msg.as_string())
-    server.quit()
