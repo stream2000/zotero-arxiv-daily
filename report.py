@@ -217,7 +217,7 @@ def generate_report(papers:list[BasePaper], db):
     # Store results in a list initialized with None to maintain order
     results = [None] * len(papers)
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         # Submit all tasks and keep track of their index in the original list
         future_to_index = {executor.submit(_render_single_paper_block, p, db): i for i, p in enumerate(papers)}
         
