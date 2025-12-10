@@ -25,6 +25,7 @@ class BasePaper(ABC):
     _citation_count_cache: Optional[int] = None
     _citation_last_updated: Optional[str] = None
     storage: Optional['Storage'] = None
+    disable_citation_check: bool = False
 
     @abstractproperty
     def title(self) -> str:
@@ -66,6 +67,9 @@ class BasePaper(ABC):
 
     @property
     def citation_count(self) -> Optional[int]:
+        if self.disable_citation_check:
+            return None
+
         # Rule 1: Don't fetch for papers published within the last 60 days.
         try:
             published = datetime.strptime(self.published_date, '%Y-%m-%d')
@@ -136,13 +140,14 @@ class BasePaper(ABC):
 
 
 class ArxivPaper(BasePaper):
-    def __init__(self, paper: arxiv.Result, storage: Optional['Storage'] = None):
+    def __init__(self, paper: arxiv.Result, storage: Optional['Storage'] = None, disable_citation_check: bool = False):
         self._paper = paper
         self._score = None
         self._tldr_cache = None
         self._citation_count_cache = None
         self._citation_last_updated = None
         self.storage = storage
+        self.disable_citation_check = disable_citation_check
 
     @property
     def source(self) -> str:
@@ -401,13 +406,14 @@ class SimpleAuthor:
 
 
 class BioRxivPaper(BasePaper):
-    def __init__(self, paper_data: dict, storage: Optional['Storage'] = None):
+    def __init__(self, paper_data: dict, storage: Optional['Storage'] = None, disable_citation_check: bool = False):
         self._paper = paper_data
         self._score = None
         self._tldr_cache = None
         self._citation_count_cache = None
         self._citation_last_updated = None
         self.storage = storage
+        self.disable_citation_check = disable_citation_check
 
     @property
     def source(self) -> str:

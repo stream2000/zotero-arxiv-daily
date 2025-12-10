@@ -83,7 +83,7 @@ def filter_corpus(corpus: list[dict], pattern: str) -> list[dict]:
     return new_corpus
 
 
-def get_arxiv_paper(query: str, db: Storage, debug: bool = False) -> list[ArxivPaper]:
+def get_arxiv_paper(query: str, db: Storage, debug: bool = False, disable_citation_check: bool = False) -> list[ArxivPaper]:
     """Retrieve new papers from ArXiv."""
     client = arxiv.Client(num_retries=10, delay_seconds=10)
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
@@ -96,7 +96,7 @@ def get_arxiv_paper(query: str, db: Storage, debug: bool = False) -> list[ArxivP
         bar = tqdm(total=len(all_paper_ids), desc="Retrieving Arxiv papers")
         for i in range(0, len(all_paper_ids), 20):
             search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            batch = [ArxivPaper(p, storage=db) for p in client.results(search)]
+            batch = [ArxivPaper(p, storage=db, disable_citation_check=disable_citation_check) for p in client.results(search)]
             bar.update(len(batch))
             papers.extend(batch)
         bar.close()
@@ -105,13 +105,13 @@ def get_arxiv_paper(query: str, db: Storage, debug: bool = False) -> list[ArxivP
         search = arxiv.Search(query='cat:cs.AI', sort_by=arxiv.SortCriterion.SubmittedDate)
         papers = []
         for i in client.results(search):
-            papers.append(ArxivPaper(i, storage=db))
+            papers.append(ArxivPaper(i, storage=db, disable_citation_check=disable_citation_check))
             if len(papers) == 5:
                 break
     return papers
 
 
-def sync_biorxiv_papers(db: Storage, days: int = 1, end_date_override: Optional[datetime] = None, debug: bool = False, rebuild_index: bool = True):
+def sync_biorxiv_papers(db: Storage, days: int = 1, end_date_override: Optional[datetime] = None, debug: bool = False, rebuild_index: bool = True, disable_citation_check: bool = False):
     """
     Fetches and stores new papers from BioRxiv for the specified number of past days.
     It checks for already completed dates and processes each new day atomically.
@@ -159,7 +159,7 @@ def sync_biorxiv_papers(db: Storage, days: int = 1, end_date_override: Optional[
                     db.mark_biorxiv_date_completed(date_str)
                     continue
                 
-                paper_objects = [BioRxivPaper(p, storage=db) for p in raw_papers_for_day]
+                paper_objects = [BioRxivPaper(p, storage=db, disable_citation_check=disable_citation_check) for p in raw_papers_for_day]
                 unique_papers = {p.arxiv_id: p for p in paper_objects}
                 existing_ids = db.get_existing_candidate_ids()
                 new_papers_for_day = [p for p in unique_papers.values() if p.arxiv_id not in existing_ids]
@@ -291,6 +291,7 @@ if __name__ == '__main__':
     add_argument('--archive_days', type=int, help='Archive reports older than this many days. Set to 0 to disable.', default=7)
     add_argument('--rebuild-index', action='store_true', help='Force rebuild of the candidate Faiss index.')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
+    parser.add_argument('--no-citations', action='store_true', help='Disable citation fetching.')
     args = parser.parse_args()
 
     if args.use_llm_api:
@@ -342,12 +343,12 @@ if __name__ == '__main__':
     # --- Sync/Fetch new papers ---
     if args.source == 'biorxiv':
         logger.info(f"Syncing BioRxiv papers for the last {args.days} days, ending on {effective_end_date.strftime('%Y-%m-%d')}")
-        sync_biorxiv_papers(db, args.days, effective_end_date, args.debug, rebuild_index=args.rebuild_index)
+        sync_biorxiv_papers(db, args.days, effective_end_date, args.debug, rebuild_index=args.rebuild_index, disable_citation_check=args.no_citations)
         logger.info("BioRxiv sync complete.")
         
     elif args.source == 'arxiv':
         logger.info("Retrieving Arxiv papers...")
-        fetched_papers = get_arxiv_paper(args.arxiv_query, db, args.debug)
+        fetched_papers = get_arxiv_paper(args.arxiv_query, db, args.debug, disable_citation_check=args.no_citations)
 
         if len(fetched_papers) == 0:
             logger.info(f"No new papers fetched from {args.source}.")
@@ -380,6 +381,7 @@ if __name__ == '__main__':
     # CRITICAL FIX: Inject the storage instance into each paper loaded from DB
     for p in candidates_from_db:
         p.storage = db
+        p.disable_citation_check = args.no_citations
 
 
     # 2. In-memory category filtering for BioRxiv
