@@ -152,11 +152,11 @@ class Storage:
 
         if rebuild_index:
             # Rebuild Faiss index from all candidates currently in SQLite
-            self._rebuild_candidate_faiss_index()
+            self.rebuild_candidate_index()
         else:
             logger.info("Skipping Faiss index rebuild as requested.")
 
-    def _rebuild_candidate_faiss_index(self):
+    def rebuild_candidate_index(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         # Fetch all candidate metadata and their actual raw_data (papers) to re-encode
