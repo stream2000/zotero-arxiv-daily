@@ -1,6 +1,7 @@
 import requests
 import time
 import random
+import urllib.parse
 from typing import Optional, List
 from functools import wraps
 from loguru import logger
@@ -44,6 +45,27 @@ def _fetch_data(url: str):
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     return response.json()
+
+def reconstruct_abstract(inverted_index: dict) -> str:
+    """Reconstructs the abstract from OpenAlex's inverted index."""
+    if not inverted_index:
+        return ""
+    
+    # The inverted index maps words to lists of positions.
+    # We need to create a list of words with the length of the max position + 1.
+    max_pos = 0
+    for pos_list in inverted_index.values():
+        for pos in pos_list:
+            if pos > max_pos:
+                max_pos = pos
+                
+    abstract_words = [""] * (max_pos + 1)
+    
+    for word, pos_list in inverted_index.items():
+        for pos in pos_list:
+            abstract_words[pos] = word
+            
+    return " ".join(abstract_words)
 
 def get_citation_count(title: str, authors: List[str]) -> Optional[int]:
     """
@@ -109,3 +131,75 @@ def get_citation_count(title: str, authors: List[str]) -> Optional[int]:
     except requests.exceptions.RequestException as e:
         print(f"Error fetching citation count for '{title}' after retries: {e}")
         return None
+
+def get_citing_papers(title: str, limit: int = 100, start_year: Optional[int] = None, end_year: Optional[int] = None) -> List[dict]:
+    """
+    Fetches the papers that cite the given paper title using OpenAlex API.
+    Returns a list of citing papers, ranked by their own citation count.
+    
+    Args:
+        title: The title of the paper to search for.
+        limit: The maximum number of citing papers to return.
+        start_year: The start year to filter citations (inclusive).
+        end_year: The end year to filter citations (inclusive).
+        
+    Returns:
+        A list of dictionaries containing details of citing papers.
+    """
+    try:
+        # 1. Search for the work ID in OpenAlex
+        # We use 'title.search' filter for better precision
+        encoded_title = urllib.parse.quote(title)
+        search_url = f"https://api.openalex.org/works?filter=title.search:{encoded_title}&sort=cited_by_count:desc&per-page=1"
+        data = _fetch_data(search_url)
+        
+        if not data.get("results"):
+            logger.warning(f"Paper not found in OpenAlex: {title}")
+            return []
+            
+        work = data["results"][0]
+        work_id = work["id"].split('/')[-1] # Extract ID from URL (e.g., https://openalex.org/W123 -> W123)
+        work_title = work["display_name"]
+        logger.info(f"Found paper (OpenAlex): {work_title} (ID: {work_id})")
+        
+        # 2. Fetch citing papers
+        # Construct filter string
+        filters = [f"cites:{work_id}"]
+        if start_year and end_year:
+            filters.append(f"from_publication_date:{start_year}-01-01")
+            filters.append(f"to_publication_date:{end_year}-12-31")
+        elif start_year:
+            filters.append(f"from_publication_date:{start_year}-01-01")
+        elif end_year:
+            filters.append(f"to_publication_date:{end_year}-12-31")
+            
+        filter_str = ",".join(filters)
+        
+        # We want highly cited papers, so sort by cited_by_count:desc
+        citations_url = f"https://api.openalex.org/works?filter={filter_str}&sort=cited_by_count:desc&per-page={limit}"
+        
+        citations_data = _fetch_data(citations_url)
+        
+        results = []
+        for res in citations_data.get("results", []):
+            # Map OpenAlex format to our internal format
+            authors = []
+            for authorship in res.get("authorships", []):
+                author_obj = authorship.get("author", {})
+                if author_obj.get("display_name"):
+                    authors.append({"name": author_obj["display_name"]})
+            
+            results.append({
+                "title": res.get("display_name"),
+                "citationCount": res.get("cited_by_count"),
+                "year": res.get("publication_year"),
+                "authors": authors,
+                "url": res.get("id"),
+                "abstract": reconstruct_abstract(res.get("abstract_inverted_index"))
+            })
+                
+        return results
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching citing papers for '{title}': {e}")
+        return []
