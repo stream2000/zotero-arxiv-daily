@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "biorxiv_client", "determine_interests", "llm", "paper", "recommender", "report", "storage"]
+py-modules = ["main", "biorxiv_client", "determine_interests", "llm", "paper", "recommender", "report", "storage", "citation_client"]
 
 [tool.pytest.ini_options]
 norecursedirs = ["paperscraper"]

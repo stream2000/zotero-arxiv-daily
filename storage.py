@@ -308,6 +308,40 @@ class Storage:
         conn.close()
         return ids
 
+    def get_recent_zotero_items(self, limit=25):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT title, abstract FROM zotero ORDER BY date_added DESC LIMIT ?", (limit,))
+        rows = c.fetchall()
+        conn.close()
+        
+        items = []
+        for row in rows:
+            items.append({"title": row[0], "abstract": row[1]})
+        return items
+
+    def get_zotero_sample(self, recent_count=10, random_count=15):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # Get recent items
+        c.execute("SELECT id, title, abstract FROM zotero ORDER BY date_added DESC LIMIT ?", (recent_count,))
+        recent_rows = c.fetchall()
+        
+        recent_ids = [r[0] for r in recent_rows]
+        items = [{"title": r[1], "abstract": r[2]} for r in recent_rows]
+        
+        # Get random items excluding recent ones
+        if random_count > 0:
+            placeholders = ','.join(['?'] * len(recent_ids))
+            query = f"SELECT title, abstract FROM zotero WHERE id NOT IN ({placeholders}) ORDER BY RANDOM() LIMIT ?"
+            c.execute(query, recent_ids + [random_count])
+            random_rows = c.fetchall()
+            items.extend([{"title": r[0], "abstract": r[1]} for r in random_rows])
+            
+        conn.close()
+        return items
+
     def get_biorxiv_completed_dates(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
