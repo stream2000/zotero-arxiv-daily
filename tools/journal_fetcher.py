@@ -28,17 +28,29 @@ load_dotenv()
 # "categories" field allows filtering by specific OpenAlex concepts (OR logic).
 # If "categories" is empty or None, it fetches ALL papers from that journal.
 BIO_JOURNALS = [
+    # Top Specialized Journals
     {"name": "Nature Methods", "categories": []},
     {"name": "Nature Biotechnology", "categories": []},
+    {"name": "Nature Machine Intelligence", "categories": []},
+    {"name": "Nature Computational Science", "categories": []},
     {"name": "Bioinformatics", "categories": []},
     {"name": "Genome Biology", "categories": []},
+    {"name": "Genome Research", "categories": []},
     {"name": "PLOS Computational Biology", "categories": []},
     {"name": "Nucleic Acids Research", "categories": []},
     {"name": "Cell Systems", "categories": []}, 
-    {"name": "Nature Machine Intelligence", "categories": []},
-    # Example of a broad journal restricted by category
-    {"name": "Nature", "categories": ["Computational biology", "Artificial intelligence", "Genomics"]},
-    {"name": "Science", "categories": ["Computational biology", "Artificial intelligence", "Genomics"]},
+    {"name": "Molecular Systems Biology", "categories": []},
+    {"name": "Briefings in Bioinformatics", "categories": []},
+    {"name": "GigaScience", "categories": []},
+    {"name": "Patterns", "categories": []},
+    
+    # Broad/High-Impact Journals (Restricted by Categories)
+    {"name": "Nature", "categories": ["Computational biology", "Artificial intelligence", "Genomics", "Bioinformatics"]},
+    {"name": "Science", "categories": ["Computational biology", "Artificial intelligence", "Genomics", "Bioinformatics"]},
+    {"name": "Nature Communications", "categories": ["Computational biology", "Artificial intelligence", "Genomics", "Bioinformatics", "Systems biology"]},
+    {"name": "Cell", "categories": ["Computational biology", "Genomics", "Systems biology"]},
+    {"name": "Nature Genetics", "categories": ["Computational biology", "Genomics", "Statistical genetics"]},
+    {"name": "Proceedings of the National Academy of Sciences", "categories": ["Computational biology", "Bioinformatics", "Systems biology"]},
 ]
 
 def retry_with_backoff(retries=3, initial_backoff=1):
@@ -104,7 +116,40 @@ def get_journal_id(journal_name: str) -> Optional[str]:
         logger.error(f"Error finding journal '{journal_name}': {e}")
         return None
 
-def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[str] = None, limit: int = 50, from_date: str = None) -> List[dict]:
+def get_concept_ids(concept_names: List[str]) -> List[str]:
+    """
+    Resolves a list of concept display names to OpenAlex Concept IDs.
+    """
+    ids = []
+    for name in concept_names:
+        try:
+            # Search for the concept
+            # sort by relevance (default) or citation count to get the main concept
+            encoded_name = urllib.parse.quote(name)
+            url = f"https://api.openalex.org/concepts?filter=display_name.search:{encoded_name}&per-page=1"
+            data = _fetch_data(url)
+            results = data.get('results', [])
+            
+            if results:
+                # Ideally check for exact match, but search is usually good enough for top concepts
+                # result[0] is the most relevant
+                concept_id = results[0]['id']
+                # OpenAlex IDs are like https://openalex.org/C12345 or just C12345
+                # The API usually returns the full URL ID.
+                # We can strip it or use it as is?
+                # Filters usually accept just the ID part (e.g. C12345) or the full URL.
+                # Let's extract the short ID to be safe and cleaner.
+                short_id = concept_id.split('/')[-1]
+                ids.append(short_id)
+            else:
+                logger.warning(f"Concept not found: {name}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to resolve concept '{name}': {e}")
+            
+    return ids
+
+def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[str] = None, limit: int = 50, from_date: str = None, to_date: str = None) -> List[dict]:
     """
     Fetches latest papers from a specific journal. 
     
@@ -115,6 +160,7 @@ def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[st
                   Used if 'query' is not provided.
         limit: Maximum number of papers to retrieve.
         from_date: ISO date string (YYYY-MM-DD) to filter papers published on or after this date.
+        to_date: ISO date string (YYYY-MM-DD) to filter papers published on or before this date.
     """
     source_id = get_journal_id(journal_name)
     if not source_id:
@@ -129,13 +175,20 @@ def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[st
         
         if from_date:
             filters.append(f"from_publication_date:{from_date}")
+        if to_date:
+            filters.append(f"to_publication_date:{to_date}")
 
-        # Concept filtering (Hardcoded categories)
+        # Concept filtering
         if concepts:
-            # Join with '|' for OR logic in OpenAlex
-            # e.g. concepts.display_name:Bioinformatics|Genomics
-            concept_str = "|".join(concepts)
-            filters.append(f"concepts.display_name:{concept_str}")
+            # Resolve names to IDs first
+            concept_ids = get_concept_ids(concepts)
+            if concept_ids:
+                # Join with '|' for OR logic in OpenAlex
+                # e.g. concepts.id:C123|C456
+                concept_str = "|".join(concept_ids)
+                filters.append(f"concepts.id:{concept_str}")
+            else:
+                logger.warning("No valid concept IDs found for the provided categories. Fetching without concept filter.")
         
         filter_str = ",".join(filters)
         
@@ -146,7 +199,7 @@ def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[st
         page = 1
         per_page = 200  # OpenAlex max per page
         
-        logger.info(f"Fetching up to {limit} papers from '{journal_name}' (since {from_date})...")
+        logger.info(f"Fetching up to {limit} papers from '{journal_name}' (from {from_date} to {to_date})...")
         if concepts:
              logger.info(f"  Filtering by concepts: {concepts}")
 
@@ -171,10 +224,11 @@ def fetch_journal_papers(journal_name: str, query: str = None, concepts: List[st
                 break
                 
             for work in results:
-                authors = [
-                    {"name": authorship.get("author", {}).get("display_name", "")}
-                    for authorship in work.get("authorships", [])
-                ]
+                authors = []
+                for authorship in work.get("authorships", []) or []:
+                    author_obj = authorship.get("author") or {}
+                    name = author_obj.get("display_name") or "Unknown Author"
+                    authors.append({"name": name})
                 
                 paper = {
                     "title": work.get("display_name"),
@@ -267,7 +321,7 @@ def evaluate_papers_with_ai(papers: List[dict]):
         except Exception as e:
             logger.error(f"Error in AI batch evaluation: {e}")
 
-def interactive_mode():
+def interactive_mode(limit: int, from_date: str, to_date: str):
     """
     Interactive CLI for browsing papers.
     """
@@ -294,13 +348,10 @@ def interactive_mode():
     journal_name = selected_journal["name"]
     categories = selected_journal["categories"]
 
-    # Default settings for streamlined mode
-    default_days = 30
-    user_date = (datetime.now() - timedelta(days=default_days)).strftime("%Y-%m-%d")
-    limit = 50
+    # Use provided limit and date
         
     # 2. Fetch Papers
-    print(f"\nFetching papers from '{journal_name}' since {user_date}...")
+    print(f"\nFetching papers from '{journal_name}' (from {from_date} to {to_date})...")
     if categories:
         print(f"Using hardcoded categories: {categories}")
     else:
@@ -309,12 +360,13 @@ def interactive_mode():
     papers = fetch_journal_papers(
         journal_name, 
         concepts=categories, # Use concepts if available
-        from_date=user_date, 
+        from_date=from_date, 
+        to_date=to_date,
         limit=limit
     )
         
     if not papers:
-        print(f"\nNo papers found in {journal_name} since {user_date}.")
+        print(f"\nNo papers found in {journal_name} since {from_date}.")
         return
 
     # 3. AI Evaluation
@@ -327,7 +379,7 @@ def interactive_mode():
     print(f"\n--- Found {len(papers)} papers in {journal_name} ---\n")
     
     report_lines = []
-    report_lines.append(f"# Papers from {journal_name} since {user_date}\n")
+    report_lines.append(f"# Papers from {journal_name} from {from_date} to {to_date}\n")
 
     for i, p in enumerate(papers, 1):
         # Console Output
@@ -355,6 +407,7 @@ def interactive_mode():
         report_lines.append(f"**AI Reason:** {p.get('ai_reason', 'N/A')}")
         report_lines.append(f"**Date:** {p['date']}")
         report_lines.append(f"**Authors:** {', '.join([a['name'] for a in p['authors']])}")
+        report_lines.append(f"**URL:** {p['url']}")
         abstract_text = p['abstract'] if p['abstract'] else "[Abstract not available via Open APIs]"
         report_lines.append(f"**Abstract:**\n{abstract_text}\n")
         report_lines.append("-" * 60 + "\n")
@@ -381,6 +434,9 @@ if __name__ == "__main__":
     parser.add_argument("--from-date", type=str, 
                         default=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
                         help="Specify a start date (YYYY-MM-DD) to fetch papers from. Defaults to 30 days ago.")
+    parser.add_argument("--to-date", type=str, 
+                        default=datetime.now().strftime("%Y-%m-%d"),
+                        help="Specify an end date (YYYY-MM-DD) to fetch papers to. Defaults to today.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum number of papers to fetch. Defaults to 50.")
     parser.add_argument("--query", type=str, help="(Optional) Keyword query to filter papers within the specified journal.")
 
@@ -390,6 +446,7 @@ if __name__ == "__main__":
         # Non-interactive mode
         journal_name = args.journal
         from_date = args.from_date
+        to_date = args.to_date
         query = args.query
         limit = args.limit
 
@@ -402,7 +459,7 @@ if __name__ == "__main__":
         else:
             categories = selected_journal_data["categories"]
 
-        print(f"\nFetching papers from '{journal_name}' since {from_date}...")
+        print(f"\nFetching papers from '{journal_name}' (from {from_date} to {to_date})...")
         if categories:
             print(f"Using hardcoded categories: {categories}")
         elif query:
@@ -415,6 +472,7 @@ if __name__ == "__main__":
             query=query,
             concepts=categories if not query else None, # Use concepts only if no keyword query is provided
             from_date=from_date,
+            to_date=to_date,
             limit=limit
         )
 
@@ -432,7 +490,7 @@ if __name__ == "__main__":
         print(f"\n--- Found {len(papers)} papers in {journal_name} ---\n")
         
         report_lines = []
-        report_lines.append(f"# Papers from {journal_name} since {from_date}\n")
+        report_lines.append(f"# Papers from {journal_name} from {from_date} to {to_date}\n")
 
         for i, p in enumerate(papers, 1):
             # Console Output
@@ -478,4 +536,4 @@ if __name__ == "__main__":
 
     else:
         # Interactive mode
-        interactive_mode()
+        interactive_mode(limit=args.limit, from_date=args.from_date, to_date=args.to_date)
