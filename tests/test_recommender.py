@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from recommender import calculate_scores, encode_texts
+from zotero_daily.recommender import calculate_scores, encode_texts
 from unittest.mock import patch, Mock
 
 class TestRecommender(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestRecommender(unittest.TestCase):
 
     def test_encode_texts(self):
         texts = ["hello world", "this is a test"]
-        with patch('recommender.SentenceTransformer') as MockSentenceTransformer:
+        with patch('zotero_daily.recommender.SentenceTransformer') as MockSentenceTransformer:
             mock_encoder = Mock()
             MockSentenceTransformer.return_value = mock_encoder
             mock_encoder.encode.return_value = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)

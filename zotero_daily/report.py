@@ -1,4 +1,4 @@
-from paper import BasePaper
+from zotero_daily.paper import BasePaper
 import math
 from tqdm import tqdm
 from loguru import logger

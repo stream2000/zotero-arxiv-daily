@@ -7,7 +7,7 @@ import re
 import time
 import json
 from datetime import datetime, timedelta
-from llm import get_llm
+from zotero_daily.llm import get_llm
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from loguru import logger
@@ -16,7 +16,7 @@ from contextlib import ExitStack
 from urllib.error import HTTPError
 from abc import ABC, abstractproperty
 
-from citation_client import get_citation_count
+from zotero_daily.citation_client import get_citation_count
 
 
 class BasePaper(ABC):

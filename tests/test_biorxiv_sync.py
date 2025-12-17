@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 # Assuming these are importable from the project root
-from storage import Storage
-from paper import BioRxivPaper
+from zotero_daily.storage import Storage
+from zotero_daily.paper import BioRxivPaper
 from main import sync_biorxiv_papers # Import the function directly
 
 # Fixture for a temporary database
@@ -50,7 +50,7 @@ def test_get_candidates_by_date_range_with_dates(storage_instance):
     paper4 = create_dummy_biorxiv_paper("10.1101/2025.12.04.000004", "2025-12-04", "molecular biology")
 
     # Mock encode_texts to return a dummy numpy array for adding candidates
-    with patch('recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32)): 
+    with patch('zotero_daily.recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32)): 
         db.add_candidates([paper1, paper2, paper3, paper4], None)
 
     # Test within a range
@@ -69,7 +69,7 @@ def test_get_candidates_by_date_range_with_dates(storage_instance):
 
 
 @patch('main.BioRxivApi')
-@patch('recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
+@patch('zotero_daily.recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
 def test_sync_biorxiv_papers_new_papers(mock_encode_texts, mock_biorxiv_api, storage_instance):
     db = storage_instance
     mock_api_instance = mock_biorxiv_api.return_value
@@ -97,14 +97,14 @@ def test_sync_biorxiv_papers_new_papers(mock_encode_texts, mock_biorxiv_api, sto
 
 
 @patch('main.BioRxivApi')
-@patch('recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
+@patch('zotero_daily.recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
 def test_sync_biorxiv_papers_existing_papers(mock_encode_texts, mock_biorxiv_api, storage_instance):
     db = storage_instance
     mock_api_instance = mock_biorxiv_api.return_value
 
     # Add a paper directly to DB first
     existing_paper = create_dummy_biorxiv_paper("10.1101/2025.12.01.000001", "2025-12-01", "bioinformatics")
-    with patch('recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32)):
+    with patch('zotero_daily.recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32)):
         db.add_candidates([existing_paper], None)
     db.mark_biorxiv_date_completed("2025-12-01") # Mark as completed so sync doesn't fetch
 
@@ -129,7 +129,7 @@ def test_sync_biorxiv_papers_existing_papers(mock_encode_texts, mock_biorxiv_api
     mock_encode_texts.assert_not_called() # Should not be called because date is already completed
 
 @patch('main.BioRxivApi')
-@patch('recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
+@patch('zotero_daily.recommender.encode_texts', return_value=np.random.rand(1, 768).astype(np.float32))
 def test_sync_biorxiv_papers_fetch_multiple_days(mock_encode_texts, mock_biorxiv_api, storage_instance):
     db = storage_instance
     mock_api_instance = mock_biorxiv_api.return_value

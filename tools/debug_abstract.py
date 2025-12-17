@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from journal_fetcher import fetch_journal_papers
 
 papers = fetch_journal_papers("Nature Methods", limit=5)

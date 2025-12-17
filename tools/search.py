@@ -1,4 +1,6 @@
 import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from loguru import logger
 
 # Configure logger to suppress debug messages from imported modules
@@ -12,11 +14,11 @@ import pickle
 import os
 import re
 from dotenv import load_dotenv
-from storage import Storage
-from recommender import encode_texts
-from paper import BasePaper
-from report import generate_report
-from llm import set_global_llm, get_llm
+from zotero_daily.storage import Storage
+from zotero_daily.recommender import encode_texts
+from zotero_daily.paper import BasePaper
+from zotero_daily.report import generate_report
+from zotero_daily.llm import set_global_llm, get_llm
 
 load_dotenv()
 

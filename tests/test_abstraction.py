@@ -5,9 +5,9 @@ from typing import List, Optional
 import numpy as np
 
 # Import the actual classes to be tested
-from paper import BasePaper, ArxivPaper, BioRxivPaper, SimpleAuthor
-from recommender import rerank_paper
-from report import generate_report
+from zotero_daily.paper import BasePaper, ArxivPaper, BioRxivPaper, SimpleAuthor
+from zotero_daily.recommender import rerank_paper
+from zotero_daily.report import generate_report
 
 # --- Mocks for testing ---
 

@@ -1,6 +1,9 @@
 import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
 import argparse
-from citation_client import get_citing_papers
+from zotero_daily.citation_client import get_citing_papers
 
 def main():
     parser = argparse.ArgumentParser(description="Get a ranked list of papers citing a specific paper.")

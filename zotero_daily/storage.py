@@ -177,7 +177,7 @@ class Storage:
         # Re-encode all abstracts from DB to get fresh embeddings
         # This might be slow if many, but ensures consistency.
         # This also assumes embeddings are always the same for same abstract.
-        from recommender import encode_texts # Import here to avoid circular dependency
+        from zotero_daily.recommender import encode_texts # Import here to avoid circular dependency
         candidate_texts = [p.summary for p in papers_from_db]
         embeddings = encode_texts(candidate_texts)
         

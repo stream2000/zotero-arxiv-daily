@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 import urllib.parse
 from typing import Optional, List
@@ -9,12 +12,12 @@ import sys
 import os
 import math
 from dotenv import load_dotenv
-import prompts # Import the new prompts module
+from zotero_daily import prompts # Import the new prompts module
 
 # Local imports
 try:
-    from storage import Storage
-    from llm import set_global_llm, get_llm
+    from zotero_daily.storage import Storage
+    from zotero_daily.llm import set_global_llm, get_llm
 except ImportError:
     # Allow running if dependencies aren't perfect, but AI features will fail later
     pass

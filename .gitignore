@@ -21,3 +21,4 @@ Gemini.md
 data/
 .tmp/
 report/
+.DS_Store

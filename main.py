@@ -15,12 +15,12 @@ from pyzotero import zotero
 from tqdm import tqdm
 import re
 
-from biorxiv_client import BioRxivApi
-from report import generate_report
-from llm import set_global_llm
-from paper import ArxivPaper, BioRxivPaper
-from recommender import encode_texts, calculate_scores
-from storage import Storage
+from zotero_daily.biorxiv_client import BioRxivApi
+from zotero_daily.report import generate_report
+from zotero_daily.llm import set_global_llm
+from zotero_daily.paper import ArxivPaper, BioRxivPaper
+from zotero_daily.recommender import encode_texts, calculate_scores
+from zotero_daily.storage import Storage
 
 # Patch arxiv.Result to find PDF URL
 def _get_pdf_url_patch(links) -> str:

@@ -1,6 +1,6 @@
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from paper import BasePaper
+from zotero_daily.paper import BasePaper
 from datetime import datetime
 import concurrent.futures
 

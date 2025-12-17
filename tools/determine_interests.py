@@ -1,8 +1,11 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import os
 import sys
 from dotenv import load_dotenv
 from main import get_zotero_corpus
-from llm import get_llm, set_global_llm
+from zotero_daily.llm import get_llm, set_global_llm
 import json
 import re
 

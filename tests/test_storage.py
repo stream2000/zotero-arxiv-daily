@@ -9,8 +9,8 @@ import pickle
 from loguru import logger
 from unittest.mock import patch, MagicMock
 
-from storage import Storage
-from paper import BioRxivPaper, ArxivPaper # Assuming these are used for candidates
+from zotero_daily.storage import Storage
+from zotero_daily.paper import BioRxivPaper, ArxivPaper # Assuming these are used for candidates
 
 class MockPaper:
     def __init__(self, arxiv_id, title="", summary="", category='', score=0.0, source='biorxiv'):
@@ -64,7 +64,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(c.fetchone()[0], 'Zotero Paper 1')
         conn.close()
 
-    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    @patch('zotero_daily.recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
     def test_add_candidates(self, mock_encode_texts):
         mock_candidates = [
             MockPaper('c1', 'Candidate 1', 'Summary 1', 'bioinformatics'),
@@ -93,7 +93,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(c.fetchone()[0], 2) # Still 2
         conn.close()
 
-    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    @patch('zotero_daily.recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
     def test_get_existing_candidate_ids(self, mock_encode_texts):
         mock_candidates = [MockPaper('e1'), MockPaper('e2')]
         self.db.add_candidates(mock_candidates, None)
@@ -101,7 +101,7 @@ class TestStorage(unittest.TestCase):
         existing_ids = self.db.get_existing_candidate_ids()
         self.assertEqual(existing_ids, {'e1', 'e2'})
 
-    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    @patch('zotero_daily.recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
     def test_update_scores(self, mock_encode_texts):
         mock_candidates = [MockPaper('s1'), MockPaper('s2')]
         self.db.add_candidates(mock_candidates, None) # Add before updating scores
@@ -115,7 +115,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(c.fetchone()[0], 0.85)
         conn.close()
 
-    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    @patch('zotero_daily.recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
     def test_get_all_candidate_ids(self, mock_encode_texts):
         mock_candidates = [MockPaper('id3'), MockPaper('id1'), MockPaper('id2')]
         self.db.add_candidates(mock_candidates, None)
@@ -123,7 +123,7 @@ class TestStorage(unittest.TestCase):
         expected_ids = ['id1', 'id2', 'id3'] # Faiss IDs are assigned based on sorted arxiv_id by _rebuild_candidate_faiss_index (ORDER BY id ASC)
         self.assertEqual(self.db.get_all_candidate_ids(), expected_ids)
 
-    @patch('recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
+    @patch('zotero_daily.recommender.encode_texts', side_effect=lambda texts: np.random.rand(len(texts), 768).astype(np.float32))
     def test_get_top_candidates(self, mock_encode_texts):
         # Add candidates with scores and categories
         papers_to_add = [
