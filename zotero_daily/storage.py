@@ -6,7 +6,9 @@ import numpy as np
 from loguru import logger
 
 class Storage:
-    def __init__(self, data_dir="data"):
+    def __init__(self, data_dir=None):
+        if data_dir is None:
+            data_dir = os.environ.get("ZOTERO_DATA_DIR", "data")
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self.db_path = os.path.join(data_dir, "metadata.db")
