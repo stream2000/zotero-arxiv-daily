@@ -3,6 +3,8 @@ import math
 from tqdm import tqdm
 from loguru import logger
 import concurrent.futures # Added for concurrency
+import time
+import traceback
 
 framework = """
 <!DOCTYPE HTML>
@@ -160,17 +162,28 @@ def get_stars(score:float):
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
 def _render_single_paper_block(p: BasePaper, db):
-    """Helper function to render a single paper block, including TLDR generation."""
-    # This will trigger the LLM call and cache the JSON string if not already done.
-    tldr_json_str = p.tldr 
-    
-    # Save to DB if it was newly generated
-    if not p.has_tldr:
+    """Helper function to render a single paper block, including TLDR generation with retry logic."""
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            # We save the raw JSON string that p.tldr returns
-            db.update_tldr(p.arxiv_id, tldr_json_str)
+            # This will trigger the LLM call and cache the JSON string if not already done.
+            tldr_json_str = p.tldr 
+            
+            # Save to DB if it was newly generated
+            if not p.has_tldr:
+                try:
+                    # We save the raw JSON string that p.tldr returns
+                    db.update_tldr(p.arxiv_id, tldr_json_str)
+                except Exception as e:
+                    logger.error(f"Failed to save TLDR for {p.arxiv_id}: {e}\n{traceback.format_exc()}")
+            break # Success, exit retry loop
         except Exception as e:
-            logger.error(f"Failed to save TLDR for {p.arxiv_id}: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"Failed to generate TLDR for {p.arxiv_id} (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+            else:
+                logger.error(f"Failed to generate TLDR for {p.arxiv_id} after {max_retries} attempts: {e}\n{traceback.format_exc()}")
+                # Re-raise to be caught in generate_report
+                raise e
 
     rate = get_stars(p.score)
     author_list = [a.name for a in p.authors]
@@ -211,6 +224,7 @@ def generate_report(papers:list[BasePaper], db):
     # Store results in a list initialized with None to maintain order
     results = [None] * len(papers)
     
+    # Restored max_workers to 16 for high-concurrency report generation.
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         # Submit all tasks and keep track of their index in the original list
         future_to_index = {executor.submit(_render_single_paper_block, p, db): i for i, p in enumerate(papers)}
@@ -220,10 +234,8 @@ def generate_report(papers:list[BasePaper], db):
             try:
                 results[index] = future.result()
             except Exception as exc:
-                logger.error(f'Paper block generation generated an exception: {exc}')
-                results[index] = get_block_html("Error rendering paper", "N/A", "", "N/A", f"Error: {exc}", "#", "#", "")
+                logger.error(f'Paper block generation failed for {papers[index].arxiv_id}: {exc}\n{traceback.format_exc()}')
+                results[index] = get_block_html("Error rendering paper", "N/A", "", papers[index].arxiv_id, f"Error: {exc}", "#", "#", "")
 
     content = '<br>' + '</br><br>'.join(results) + '</br>'
     return framework.replace('__CONTENT__', content)
-
-

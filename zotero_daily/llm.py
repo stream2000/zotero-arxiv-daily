@@ -44,17 +44,34 @@ class LLM:
                         response = self.llm.chat.completions.create(messages=messages, temperature=0, model=self.model)
                         return response.choices[0].message.content
                     elif self.provider == "gemini":
+                        import requests
+                        import json
+                        import os
                         # Convert messages to a single prompt for Gemini
                         prompt = ""
                         for msg in messages:
                             prompt += f"{msg['role']}: {msg['content']}\n\n"
-                        response = self.llm.generate_content(prompt)
-                        return response.text
+                        
+                        api_key = os.environ.get("GEMINI_API_KEY")
+                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={api_key}"
+                        headers = {'Content-Type': 'application/json'}
+                        payload = {
+                            "contents": [{"parts": [{"text": prompt}]}]
+                        }
+                        
+                        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                        resp.raise_for_status()
+                        result = resp.json()
+                        
+                        if 'candidates' in result and len(result['candidates']) > 0:
+                            return result['candidates'][0]['content']['parts'][0]['text']
+                        else:
+                            raise Exception(f"Invalid Gemini response: {result}")
                 except Exception as e:
                     logger.error(f"Attempt {attempt + 1} to call {self.provider} API failed: {e}")
                     if attempt == max_retries - 1:
                         raise # Re-raise if all retries fail
-                    sleep(3)
+                    sleep(1)
         else:
             # This branch for local llama-cpp-python should not be reached if self.llm is None.
             # If self.llm was initialized, it implies llama_cpp was present.

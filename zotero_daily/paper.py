@@ -11,7 +11,6 @@ from zotero_daily.llm import get_llm
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from loguru import logger
-import tiktoken
 from contextlib import ExitStack
 from urllib.error import HTTPError
 from abc import ABC, abstractproperty
@@ -313,28 +312,29 @@ class ArxivPaper(BasePaper):
         if self._tldr_cache:
             return self._tldr_cache
             
+        # Optimization: Skip downloading full source text (self.tex) to avoid ConnectionResetError
+        # and improve speed. Title and Abstract are sufficient for a high-quality TLDR.
         introduction = ""
         conclusion = ""
-        if self.tex is not None:
-            content = self.tex.get("all")
-            if content is None:
-                content = "\n".join(self.tex.values())
-            # remove cite
-            content = re.sub(r'~?\\cite.?\{.*?\}', '', content)
-            # remove figure
-            content = re.sub(r'\\begin\{figure\}.*?\\end\{figure\}', '', content, flags=re.DOTALL)
-            # remove table
-            content = re.sub(r'\\begin\{table\}.*?\\end\{table\}', '', content, flags=re.DOTALL)
-            # find introduction and conclusion
-            # end word can be \section or \end{document} or \bibliography or \appendix
-            match = re.search(r'\\section\{Introduction\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)',
-                              content, flags=re.DOTALL)
-            if match:
-                introduction = match.group(0)
-            match = re.search(r'\\section\{Conclusion\}.*?(\\section|\\end\{document\}|\\bibliography|\\appendix|$)',
-                              content, flags=re.DOTALL)
-            if match:
-                conclusion = match.group(0)
+
+        prompt = """Given the title and abstract of a paper, generate a JSON object with three keys:
+"title_zh": Translate the title to Chinese.
+"tldr_en": A one-sentence TLDR summary in English.
+"tldr_zh": A more detailed TLDR summary in Chinese (2-3 sentences).
+
+Strictly return ONLY the JSON object, no markdown formatting.
+
+Title: {title}
+Abstract: {abstract}
+"""
+        prompt = prompt.format(
+            title=self.title,
+            abstract=self.summary
+        )
+
+        # Use character-based truncation instead of tiktoken
+        prompt = prompt[:12000]
+
         llm = get_llm()
         response = llm.generate(
             messages=[
@@ -373,11 +373,8 @@ class ArxivPaper(BasePaper):
                 logger.debug(f"Failed to extract affiliations of {self.arxiv_id}: No author information found.")
                 return None
             prompt = f"Given the author information of a paper in latex format, extract the affiliations of the authors in a python list format, which is sorted by the author order. If there is no affiliation found, return an empty list '[]'. Following is the author information:\n{information_region}"
-            # use gpt-4o tokenizer for estimation
-            enc = tiktoken.encoding_for_model("gpt-4o")
-            prompt_tokens = enc.encode(prompt)
-            prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
-            prompt = enc.decode(prompt_tokens)
+            # Use character-based truncation
+            prompt = prompt[:12000]
             llm = get_llm()
             affiliations = llm.generate(
                 messages=[
@@ -468,11 +465,8 @@ Abstract: {abstract}
             abstract=self.summary
         )
 
-        # use gpt-4o tokenizer for estimation
-        enc = tiktoken.encoding_for_model("gpt-4o")
-        prompt_tokens = enc.encode(prompt)
-        prompt_tokens = prompt_tokens[:4000]
-        prompt = enc.decode(prompt_tokens)
+        # Use character-based truncation instead of tiktoken
+        prompt = prompt[:12000]
 
         response = llm.generate(
             messages=[
